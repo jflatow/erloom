@@ -1,0 +1,4 @@
+%% -*- erlang -*-
+{application, agency,
+ [{vsn, []},
+  {applications, [kernel, stdlib]}]}.

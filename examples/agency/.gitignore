@@ -1,0 +1,4 @@
+ebin/
+var/
+.eunit/
+.rebar/

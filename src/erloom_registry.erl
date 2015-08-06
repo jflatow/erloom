@@ -1,0 +1,68 @@
+-module(erloom_registry).
+
+%% The registry is started when erloom is run as an application.
+%% This is the default usage, and by default looms use it to find or spawn pids.
+
+-behavior(gen_server).
+-export([start/0]).
+-export([init/1,
+         handle_call/3,
+         handle_cast/2,
+         handle_info/2,
+         terminate/2,
+         code_change/3]).
+
+-export([proc/2]).
+-record(state, {looms}).
+
+%% gen_server
+
+start() ->
+    gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
+
+init([]) ->
+    process_flag(trap_exit, true),
+    {ok, #state{looms=#{}}}.
+
+handle_call(state, _From, State) ->
+    {reply, State, State};
+handle_call({proc, Id, Spec}, _From, #state{looms=Looms} = State) ->
+    case maps:find(Id, Looms) of
+        {ok, Pid} ->
+                {reply, Pid, State};
+        error ->
+            case erloom_listener:start(Spec) of
+                Pid when is_pid(Pid) ->
+                    {reply, Pid, store_(Id, Pid, State)}
+            end
+    end.
+
+handle_cast(_Msg, State) ->
+    {noreply, State}.
+
+handle_info({'EXIT', Pid, _Reason}, State) ->
+    {noreply, erase_(Pid, State)}.
+
+terminate(_Reason, State) ->
+    {ok, State}.
+
+code_change(_OldVsn, State, _Extra) ->
+    {ok, State}.
+
+%% state helpers
+
+store_(Id, Pid, State = #state{looms=Looms}) ->
+    State#state{looms=maps:put(Pid, Id, maps:put(Id, Pid, Looms))}.
+
+erase_(IdOrPid, State = #state{looms=Looms}) ->
+    case maps:find(IdOrPid, Looms) of
+        {ok, PidOrId} ->
+            State#state{looms=maps:without([IdOrPid, PidOrId], Looms)};
+        error ->
+            State
+    end.
+
+%% registry interface
+
+proc(Id, Spec) ->
+    gen_server:call(?MODULE, {proc, Id, Spec}).

@@ -1,0 +1,5 @@
+%% -*- erlang -*-
+{application, erloom,
+ [{vsn, []},
+  {mod, {erloom, []}},
+  {applications, [kernel, stdlib]}]}.
