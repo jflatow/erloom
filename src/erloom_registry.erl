@@ -31,7 +31,7 @@ handle_call({proc, Id, Spec}, _From, #state{looms=Looms} = State) ->
         {ok, Pid} ->
                 {reply, Pid, State};
         error ->
-            case erloom_listener:start(Spec) of
+            case erloom_listener:spawn(Spec) of
                 Pid when is_pid(Pid) ->
                     {reply, Pid, store_(Id, Pid, State)}
             end

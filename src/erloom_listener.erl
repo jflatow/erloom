@@ -1,13 +1,13 @@
 -module(erloom_listener).
 
--export([start/1]).
+-export([spawn/1]).
 
-start(Spec) ->
+spawn(Spec) ->
     spawn_link(fun () -> init(Spec) end).
 
 init(Spec) ->
     Listener = self(),
-    Worker = erloom_worker:start(),
+    Worker = erloom_worker:spawn(),
     State = loom:load(#{listener => Listener, worker => Worker, spec => Spec}),
     listen(catchup, State).
 

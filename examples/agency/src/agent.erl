@@ -15,6 +15,8 @@ opts({agent, _}) ->
 
 pure_effects(#{set_peers := Peers}, _Node, State) ->
     loom:set_peers(Peers, State);
+pure_effects(#{do := save}, _Node, State) ->
+    loom:save(State);
 pure_effects(Message, Node, State) ->
     io:format("pure effects: ~p ~p~n", [Message, Node]),
     State.
@@ -23,7 +25,7 @@ side_effects(_Message, Reply, _State, State) ->
     Reply(State),
     State.
 
-write_through(#{command := get_state}, _State) ->
+write_through(#{do := get_state}, _State) ->
     {0, infinity};
 write_through(_Message, _State) ->
     {1, 30000}.

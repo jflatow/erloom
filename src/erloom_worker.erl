@@ -1,8 +1,8 @@
 -module(erloom_worker).
 
--export([start/0]).
+-export([spawn/0]).
 
-start() ->
+spawn() ->
     spawn_link(fun () -> wait() end).
 
 wait() ->
@@ -32,7 +32,7 @@ replay_logs(State = #{front := Front}) ->
         %% if we don't target our own front first, its not guaranteed we will reach it
         replay_logs([maps:with([node()], Front), maps:without([node()], Front)], State)
     catch
-        %% if we cant go any further, try to resolve the problem quickly
+        %% if we can't go any further, try to resolve the problem quickly
         %% in the meantime just return as far as we get
         throw:{unreachable, Target, State1} ->
             erloom_sync:maybe_pull(Target, State1)
