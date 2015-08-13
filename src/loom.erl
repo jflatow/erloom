@@ -13,7 +13,6 @@
             sync_interval => pos_integer(),
             unanswered_max => pos_integer()
            }.
--type logs() :: #{node() => erloom:log()}.
 -type message() :: #{deps => erloom:edge()}.
 -type reply() :: fun((term()) -> term()).
 -type state() :: #{
@@ -22,14 +21,15 @@
              spec => spec(),
              home => path(),
              opts => opts(),
-             logs => logs(),
+             logs => erloom:logs(),
+             ours => erloom:which(),
              prior => erloom:edge(),
              front => erloom:edge(),
              edges => erloom:edges(),
              point => erloom:edge(),
              cache => #{node() => {pid() | undefined, non_neg_integer()}},
-             peers => #{node() => {non_neg_integer(), non_neg_integer()}},
-             wrote => boolean()
+             peers => #{node() => boolean()},
+             wrote => {non_neg_integer(), non_neg_integer()}
             }.
 
 -callback proc(spec()) -> pid().
@@ -50,8 +50,8 @@
 -callback emit_message(state()) -> message() | nil.
 -callback check_node(node(), pos_integer(), state()) -> state().
 
--optional_callbacks([opts/1,
-                     proc/1,
+-optional_callbacks([proc/1,
+                     opts/1,
                      keep/1,
                      verify_message/2,
                      write_through/2,
@@ -91,8 +91,7 @@
          remove_peers/2,
          set_peers/2]).
 
--export([point_to_front/2,
-         unmet_deps/2,
+-export([unmet_deps/2,
          obtain_log/2,
          extend_log/4,
          replay_log/4,
@@ -158,7 +157,7 @@ path(Name, State) ->
 
 keep(State = #{spec := Spec}) ->
     %% keep the builtins that are permanent or cached, plus whatever the callback wants
-    %% edges is cached: its where we think others nodes are
+    %% edges is cached: its where we think other nodes are
     %% point is permanent: exactly its where our state is
     %% peers is a special case of permanent keys + transient values, we just keep both:
     %%  the keys are the nodes that count as part of our 'cluster', e.g. for writing
@@ -174,17 +173,39 @@ kept(State) ->
     binary_to_term(path:read(path(state, State), term_to_binary(#{}))).
 
 logs(State) ->
-    lists:foldl(fun (Name, Logs) ->
-                        {ok, Log} = log:open(path([logs, Name], State)),
-                        Node = util:atom(url:unescape(Name)),
-                        Logs#{Node => Log}
-                end, #{}, path:list(path(logs, State))).
+    lists:foldl(fun ([NodeDir, Id], Logs) ->
+                        {ok, Log} = log:open(path([logs, NodeDir, Id], State)),
+                        Node = util:atom(url:unescape(NodeDir)),
+                        Logs#{{Node, Id} => Log}
+                end, #{}, path:list(path(logs, State), 2)).
+
+ours(State) ->
+    %% the 'ours' link tells us if we've reset or not: if it's missing, we should start a new log
+    %% otherwise, in a previous incarnation we may have had a log for which we are missing entries
+    %% in that case, others could be ahead of us on our own log, which would be a disaster
+    %% NB: restarting from a backup image can be apocalyptic if it preserves the link!
+    %%     if replicas are not enough and you really want to create snapshots, get rid of the links
+    case file:read_link(path(ours, State)) of
+        {ok, Name} ->
+            %% if we have the link, it tells us which log is ours
+            ["logs", NodeDir, Id] = filename:split(Name),
+            {util:atom(url:unescape(NodeDir)), Id};
+        {error, enoent} ->
+            %% if not, we create a unique-ish name
+            %% prefixing by a timestamp usually makes ordering incarnations easy on the eyes
+            %% but clock skew between replacement nodes is always possible so don't rely on it
+            %% for now just create the link, we'll create the log itself when we first obtain it
+            Id = base64url:encode([util:bin(time:unix()), crypto:rand_bytes(2)]),
+            ok = path:link(filename:join(["logs", url:esc(node()), Id]), path(ours, State)),
+            {node(), Id}
+    end.
 
 load(State = #{home := _}) ->
     Kept = kept(State),
     Logs = logs(State),
     State1 = State#{
                logs => Logs,
+               ours => ours(State),
                front => util:map(Logs, fun log:locus/1),
                edges => util:get(Kept, edges, #{}),
                point => util:get(Kept, point, #{}),
@@ -272,9 +293,6 @@ remove_peers([], State) ->
 set_peers(Nodes, State) ->
     add_peers(Nodes, State#{peers => #{}}).
 
-point_to_front(Node, State) ->
-    util:modify(State, [point, Node], util:lookup(State, [front, Node])).
-
 unmet_deps(#{deps := Deps}, #{point := Point}) ->
     case erloom:edge_delta(Deps, Point) of
         Delta when map_size(Delta) > 0 ->
@@ -285,34 +303,34 @@ unmet_deps(#{deps := Deps}, #{point := Point}) ->
 unmet_deps(_Message, _State) ->
     nil.
 
-obtain_log(Node, State = #{logs := Logs}) ->
-    case util:get(Logs, Node) of
+obtain_log(Which = {Node, Id}, State = #{logs := Logs}) ->
+    case util:get(Logs, Which) of
         undefined ->
-            {ok, Log} = log:open(path([logs, url:esc(Node)], State)),
-            {Log, State#{logs => Logs#{Node => Log}}};
+            {ok, Log} = log:open(path([logs, url:esc(Node), Id], State)),
+            {Log, State#{logs => Logs#{Which => Log}}};
         Log ->
             {Log, State}
     end.
 
-extend_log(Log, [{{_, After} = Range, Data}|Rest], Node, State = #{front := Front}) ->
+extend_log(Log, [{{_, After} = Range, Data}|Rest], Which, State = #{front := Front}) ->
     {ok, Range} = log:write(Log, Data, call),
-    extend_log(Log, Rest, Node, State#{front => Front#{Node => After}});
+    extend_log(Log, Rest, Which, State#{front => Front#{Which => After}});
 extend_log(_, [], _, State) ->
     State.
 
-replay_log(Fun, Range, Node, State) ->
-    {Log, State1} = obtain_log(Node, State),
+replay_log(Fun, Range, Which, State) ->
+    {Log, State1} = obtain_log(Which, State),
     {{_, After}, State2 = #{point := Point}} =
         log:bendl(Log,
                   fun ({{Before, _}, Data}, S = #{point := P}) ->
                           %% NB: we mark Before in case Fun decides to exit early
-                          Fun(binary_to_term(Data), Node, S#{point => P#{Node => Before}})
+                          Fun(binary_to_term(Data), Which, S#{point => P#{Which => Before}})
                   end, State1, Range),
-    State2#{point => Point#{Node => After}}.
+    State2#{point => Point#{Which => After}}.
 
 write_log(Message, State) when is_map(Message) ->
     write_log(term_to_binary(Message), State);
-write_log(Data, State = #{front := Front}) ->
-    {Log, State1} = obtain_log(node(), State),
+write_log(Data, State = #{ours := Ours, front := Front}) ->
+    {Log, State1} = obtain_log(Ours, State),
     {ok, {_, After} = Range} = log:write(Log, Data, call),
-    {[{Range, Data}], State1#{front => Front#{node() => After}}}.
+    {[{Range, Data}], State1#{front => Front#{Ours => After}}}.

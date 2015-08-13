@@ -1,7 +1,7 @@
 -module(erloom).
 
--export_type([log/0,
-              mark/0,
+-export_type([mark/0,
+              which/0,
               range/0,
               delta/0,
               edge/0,
@@ -9,14 +9,20 @@
               entry/0,
               entries/0]).
 
--opaque log() :: pid().
+-export_type([log/0,
+              logs/0]).
+
 -opaque mark() :: {binary(), binary()} | undefined.
+-type which() :: {node(), binary()}.
 -type range() :: {mark(), mark()}.
--type delta() :: #{node() => range()}.
--type edge() :: #{node() => mark()}.
+-type delta() :: #{which() => range()}.
+-type edge() :: #{which() => mark()}.
 -type edges() :: #{node() => edge()}.
 -type entry() :: {range(), binary()}.
--type entries() :: #{node() => [entry()]}.
+-type entries() :: #{which() => [entry()]}.
+
+-opaque log() :: pid().
+-type logs() :: #{which() => log()}.
 
 -spec delta_lower(delta()) -> edge().
 -spec delta_upper(delta()) -> edge().
@@ -37,7 +43,8 @@
 -export([delta_lower/1,
          delta_upper/1,
          edge_delta/2,
-         edge_hull/2]).
+         edge_hull/2,
+         edges_max/2]).
 
 %% command-line
 
@@ -78,21 +85,31 @@ delta_upper(D) ->
     util:map(D, fun ({_, U}) -> U end).
 
 edge_delta(X, Y) ->
-    maps:fold(fun (Node, XMark, Delta) ->
-                      case maps:get(Node, Y, undefined) of
+    maps:fold(fun (Which, XMark, Delta) ->
+                      case maps:get(Which, Y, undefined) of
                           YMark when YMark < XMark ->
-                              Delta#{Node => {YMark, XMark}};
+                              Delta#{Which => {YMark, XMark}};
                           _ ->
                               Delta
                       end
               end, #{}, X).
 
 edge_hull(X, Y) ->
-    maps:fold(fun (Node, XMark, Max) ->
-                      case maps:get(Node, Y, undefined) of
+    maps:fold(fun (Which, XMark, Max) ->
+                      case maps:get(Which, Y, undefined) of
                           YMark when YMark < XMark ->
-                              Max#{Node => XMark};
+                              Max#{Which => XMark};
                           _ ->
                               Max
                       end
               end, Y, X).
+
+edges_max(Which, Edges) ->
+    maps:fold(fun (Node, Edge, {N, M}) ->
+                      case maps:get(Which, Edge, undefined) of
+                          Mark when Mark >= M ->
+                              {Node, Mark};
+                          _ ->
+                              {N, M}
+                      end
+              end, {undefined, undefined}, Edges).

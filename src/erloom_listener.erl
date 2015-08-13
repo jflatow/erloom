@@ -101,9 +101,9 @@ react(ready, Other, State) ->
     %% we do catchup after, so new state can emit or whatever too
     listen(catchup, loom:handle_info(Other, State));
 
-react(busy, {worker_done, NewState}, State = #{front := Front}) ->
+react(busy, {worker_done, NewState}, State = #{ours := Ours, front := Front}) ->
     %% listener is the authority on where all the logs are, except our own tip
-    Front1 = maps:merge(Front, maps:with([node()], maps:get(front, NewState))),
+    Front1 = maps:merge(Front, maps:with([Ours], maps:get(front, NewState))),
     State1 = maps:merge(NewState, maps:with([opts, edges], State)),
     listen(catchup, State1#{front => Front1});
 react(busy, {sync_logs, Packet}, State) ->
