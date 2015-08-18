@@ -44,7 +44,7 @@
 -callback verify_message(message(), state()) ->
     {ok, message(), state()} |
     {missing, erloom:edge(), state()} |
-    {error, term(), state()}.
+    {term(), term(), state()}.
 -callback write_through(message(), state()) ->
     {non_neg_integer(), non_neg_integer()} |
     fun((pos_integer()) -> {non_neg_integer(), non_neg_integer()}).

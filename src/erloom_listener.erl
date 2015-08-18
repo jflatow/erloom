@@ -26,7 +26,7 @@ listen(catchup, State) ->
     %% if this is our first time through, we might not be at our own tip
     %%  dont emit as we may have already done it
     %% otherwise we might be waiting / recovering
-    %%  its not safe to our log yet in that case
+    %%  its not safe to write to our log yet
     replay_logs(State);
 
 listen(ready, State = #{opts := Opts}) ->

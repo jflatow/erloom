@@ -17,7 +17,7 @@ wait() ->
             State1 = replay_logs(State),
             done(State1);
         {sync_logs, _} ->
-            %% flush extraneous messages while we are not waiting
+            %% flush extraneous messages while we are not waiting for acks
             wait()
     end.
 
@@ -82,9 +82,9 @@ write_through({W, T}, Message, State = #{peers := Peers, ours := Ours}) when W >
     %% write to our own log, and push the entries right away
     {EntryList, State1} = erloom_logs:write(Message, State),
     State2 = erloom_sync:do_push(#{Ours => EntryList}, State1),
-    Peers = util:map(Peers, fun (_) -> false end),
+    Peers1 = util:map(Peers, fun (_) -> false end),
     Tip = util:lookup(State2, [front, node()]),
-    wait_for({W, T}, 1, Tip, time:timer(), State2#{peers => Peers});
+    wait_for({W, T}, 1, Tip, time:timer(), State2#{peers => Peers1});
 write_through({0, _}, _, State) ->
     State.
 
@@ -92,7 +92,7 @@ wait_for({W, T}, N, Tip, Start, State = #{peers := Peers}) when N < W ->
     %% give the nodes a chance to reply that they've synced up to our tip
     receive
         {sync_logs, #{from := {FromNode, _}, front := Edge}} ->
-            case {util:get(Edge, node()), util:has(Peers, FromNode)} of
+            case {util:get(Edge, node()), util:has(Peers, [FromNode])} of
                 {Mark, IsPeer} when Mark < Tip orelse not IsPeer ->
                     wait_for({W, T}, N, Tip, Start, State);
                 _ ->

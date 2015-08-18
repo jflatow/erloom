@@ -24,11 +24,16 @@ pure_effects(Message, Node, State) ->
 side_effects(#{do := get_state}, Reply, _State, State) ->
     Reply(State),
     State;
+side_effects(#{write := _}, Reply, _State, State = #{wrote := Wrote}) ->
+    Reply(Wrote),
+    State;
 side_effects(_Message, Reply, _State, State) ->
     Reply(ok),
     State.
 
 write_through(#{do := get_state}, _State) ->
     {0, infinity};
+write_through(#{write := N}, _State) when is_integer(N) ->
+    {N, 1000};
 write_through(_Message, _State) ->
-    {1, 30000}.
+    {1, infinity}.
