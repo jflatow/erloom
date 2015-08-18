@@ -13,11 +13,15 @@
             sync_interval => pos_integer(),
             unanswered_max => pos_integer()
            }.
--type message() :: #{deps => erloom:edge()}.
+-type message() :: #{
+               deps => erloom:edge(),
+               type => term()
+              }.
 -type reply() :: fun((term()) -> term()).
 -type state() :: #{
              listener => pid(),
              worker => pid(),
+             status => ok | waiting | recovering,
              spec => spec(),
              home => path(),
              opts => opts(),
@@ -29,6 +33,7 @@
              point => erloom:edge(),
              cache => #{node() => {pid() | undefined, non_neg_integer()}},
              peers => #{node() => boolean()},
+             emits => [{term(), message()}],
              wrote => {non_neg_integer(), non_neg_integer()}
             }.
 
@@ -47,7 +52,6 @@
 -callback side_effects(message(), reply(), state(), state()) -> state().
 -callback handle_info(term(), state()) -> state().
 -callback handle_idle(state()) -> state().
--callback emit_message(state()) -> message() | nil.
 -callback check_node(node(), pos_integer(), state()) -> state().
 
 -optional_callbacks([proc/1,
@@ -59,7 +63,6 @@
                      side_effects/4,
                      handle_info/2,
                      handle_idle/1,
-                     emit_message/1,
                      check_node/3]).
 
 -export([proc/1,
@@ -75,13 +78,13 @@
          load/1,
          sleep/1,
          delegate/1,
+         unmet_deps/2,
          verify_message/2,
          write_through/2,
          pure_effects/3,
          side_effects/4,
          handle_info/2,
          handle_idle/1,
-         emit_message/1,
          check_node/3]).
 
 -export([callback/3,
@@ -91,11 +94,8 @@
          remove_peers/2,
          set_peers/2]).
 
--export([unmet_deps/2,
-         obtain_log/2,
-         extend_log/4,
-         replay_log/4,
-         write_log/2]).
+-export([charge_emit/3,
+         cancel_emit/2]).
 
 %% 'proc' defines the mechanism for 'find or spawn pid for spec'
 %% the default is to use spec as the registry key, which requires erloom app is running
@@ -146,6 +146,7 @@ opts(Spec) ->
       sync_initial => time:timer(),
       sync_interval => 60000 + random:uniform(10000), %% stagger for efficiency
       sync_log_limit => 1000,
+      sync_push_prob => 0.10,
       unanswered_max => 5
      },
     maps:merge(Defaults, callback(Spec, {opts, 1}, [Spec], #{})).
@@ -172,80 +173,90 @@ save(State) ->
 kept(State) ->
     binary_to_term(path:read(path(state, State), term_to_binary(#{}))).
 
-logs(State) ->
-    lists:foldl(fun ([NodeDir, Id], Logs) ->
-                        {ok, Log} = log:open(path([logs, NodeDir, Id], State)),
-                        Node = util:atom(url:unescape(NodeDir)),
-                        Logs#{{Node, Id} => Log}
-                end, #{}, path:list(path(logs, State), 2)).
-
-ours(State) ->
-    %% the 'ours' link tells us if we've reset or not: if it's missing, we should start a new log
-    %% otherwise, in a previous incarnation we may have had a log for which we are missing entries
-    %% in that case, others could be ahead of us on our own log, which would be a disaster
-    %% NB: restarting from a backup image can be apocalyptic if it preserves the link!
-    %%     if replicas are not enough and you really want to create snapshots, get rid of the links
-    case file:read_link(path(ours, State)) of
-        {ok, Name} ->
-            %% if we have the link, it tells us which log is ours
-            ["logs", NodeDir, Id] = filename:split(Name),
-            {util:atom(url:unescape(NodeDir)), Id};
-        {error, enoent} ->
-            %% if not, we create a unique-ish name
-            %% prefixing by a timestamp usually makes ordering incarnations easy on the eyes
-            %% but clock skew between replacement nodes is always possible so don't rely on it
-            %% for now just create the link, we'll create the log itself when we first obtain it
-            Id = base64url:encode([util:bin(time:unix()), crypto:rand_bytes(2)]),
-            ok = path:link(filename:join(["logs", url:esc(node()), Id]), path(ours, State)),
-            {node(), Id}
-    end.
-
 load(State = #{home := _}) ->
     Kept = kept(State),
-    Logs = logs(State),
-    State1 = State#{
-               logs => Logs,
-               ours => ours(State),
-               front => util:map(Logs, fun log:locus/1),
+    State1 = erloom_logs:load(State),
+    State2 = State1#{
                edges => util:get(Kept, edges, #{}),
                point => util:get(Kept, point, #{}),
                peers => util:get(Kept, peers, #{}),
-               cache => #{}
+               cache => #{},
+               emits => []
               },
-    maps:merge(Kept, State1);
+    maps:merge(Kept, State2);
 load(State = #{spec := Spec}) ->
     load(State#{home => home(Spec), opts => opts(Spec)}).
 
-sleep(State) ->
+sleep(State = #{logs := Logs}) ->
     save(State),
+    maps:fold(fun (_, Log, _) -> log:close(Log) end, nil, Logs),
     exit(sleep).
 
 delegate(#{listener := Listener}) ->
     {node(), Listener}.
 
+unmet_deps(#{deps := Deps}, #{point := Point}) ->
+    case erloom:edge_delta(Deps, Point) of
+        Delta when map_size(Delta) > 0 ->
+            erloom:delta_upper(Delta);
+        _ ->
+            nil
+    end;
+unmet_deps(_Message, _State) ->
+    nil.
+
+ready_to_accept(Message, State = #{status := waiting}) ->
+    %% reject everything except seed messages
+    %% without it, we don't know if we should start from scratch, or if we should recover
+    case util:get(Message, type) of
+        seed ->
+            {true, State#{status => ok}};
+        _ ->
+            {false, State}
+    end;
+ready_to_accept(_Message, State = #{status := recovering}) ->
+    {false, State};
+ready_to_accept(_Message, State = #{status := ok}) ->
+    {true, State}.
+
 verify_message(Message, State = #{spec := Spec}) ->
     %% should we even accept the message?
-    %% at a minimum, any dependencies must be met
-    case unmet_deps(Message, State) of
-        nil ->
-            callback(Spec, {verify_message, 2}, [Message, State], {ok, Message, State});
-        Deps ->
-            {missing, Deps, State}
+    %% at a minimum, we must be ready to accept, and any dependencies must be met
+    case ready_to_accept(Message, State) of
+        {true, State1} ->
+            case unmet_deps(Message, State1) of
+                nil ->
+                    callback(Spec, {verify_message, 2}, [Message, State1], {ok, Message, State1});
+                Deps ->
+                    {missing, Deps, State1}
+            end;
+        {false, State1} ->
+            {retry, not_ready, State1}
     end.
 
 write_through(Message, State = #{spec := Spec}) ->
     %% how many copies of a message are required for a successful write? in what timeframe?
     callback(Spec, {write_through, 2}, [Message, State], {1, infinity}).
 
+auto_effects(#{type := seed, peers := Peers}, _Node, State) ->
+    %% the seed message sets the initial peer group
+    set_peers(Peers, State);
+auto_effects(_Message, _Node, State) ->
+    State.
+
 pure_effects(Message, Node, State = #{spec := Spec}) ->
     %% these effects will be applied to the state on every node
     %% they should be externally idempotent, as they happen 'at least once'
-    callback(Spec, {pure_effects, 3}, [Message, Node, State], State).
+    %% auto_effects are builtins that happen automatically for all looms
+    State1 = auto_effects(Message, Node, State),
+    callback(Spec, {pure_effects, 3}, [Message, Node, State1], State1).
 
 side_effects(Message, Reply, State0 = #{spec := Spec}, State1) ->
     %% these effects will only be applied when a new message is received
     %% it is possible they won't happen at all, they are 'at most once'
-    callback(Spec, {side_effects, 4}, [Message, Reply, State0, State1], State1).
+    %% the default is to acknowledge that we received a message with 'ok'
+    Ok = fun () -> Reply(ok), State1 end,
+    callback(Spec, {side_effects, 4}, [Message, Reply, State0, State1], Ok).
 
 handle_info({'EXIT', Listener, Reason}, #{listener := Listener, worker := Worker}) ->
     exit(Worker, Reason);
@@ -256,9 +267,6 @@ handle_info(Info, State = #{spec := Spec}) ->
 
 handle_idle(State = #{spec := Spec}) ->
     callback(Spec, {handle_idle, 1}, [State], State).
-
-emit_message(State = #{spec := Spec}) ->
-    callback(Spec, {emit_message, 1}, [State], nil).
 
 check_node(Node, Unanswered, State = #{spec := Spec}) ->
     callback(Spec, {check_node, 3}, [Node, Unanswered, State], State).
@@ -293,44 +301,8 @@ remove_peers([], State) ->
 set_peers(Nodes, State) ->
     add_peers(Nodes, State#{peers => #{}}).
 
-unmet_deps(#{deps := Deps}, #{point := Point}) ->
-    case erloom:edge_delta(Deps, Point) of
-        Delta when map_size(Delta) > 0 ->
-            erloom:delta_upper(Delta);
-        _ ->
-            nil
-    end;
-unmet_deps(_Message, _State) ->
-    nil.
+charge_emit(Key, Message, State = #{emits := Emits}) ->
+    State#{emits => util:set(Emits, Key, Message)}.
 
-obtain_log(Which = {Node, Id}, State = #{logs := Logs}) ->
-    case util:get(Logs, Which) of
-        undefined ->
-            {ok, Log} = log:open(path([logs, url:esc(Node), Id], State)),
-            {Log, State#{logs => Logs#{Which => Log}}};
-        Log ->
-            {Log, State}
-    end.
-
-extend_log(Log, [{{_, After} = Range, Data}|Rest], Which, State = #{front := Front}) ->
-    {ok, Range} = log:write(Log, Data, call),
-    extend_log(Log, Rest, Which, State#{front => Front#{Which => After}});
-extend_log(_, [], _, State) ->
-    State.
-
-replay_log(Fun, Range, Which, State) ->
-    {Log, State1} = obtain_log(Which, State),
-    {{_, After}, State2 = #{point := Point}} =
-        log:bendl(Log,
-                  fun ({{Before, _}, Data}, S = #{point := P}) ->
-                          %% NB: we mark Before in case Fun decides to exit early
-                          Fun(binary_to_term(Data), Which, S#{point => P#{Which => Before}})
-                  end, State1, Range),
-    State2#{point => Point#{Which => After}}.
-
-write_log(Message, State) when is_map(Message) ->
-    write_log(term_to_binary(Message), State);
-write_log(Data, State = #{ours := Ours, front := Front}) ->
-    {Log, State1} = obtain_log(Ours, State),
-    {ok, {_, After} = Range} = log:write(Log, Data, call),
-    {[{Range, Data}], State1#{front => Front#{Ours => After}}}.
+cancel_emit(Key, State = #{emits := Emits}) ->
+    State#{emits => util:delete(Emits, Key)}.

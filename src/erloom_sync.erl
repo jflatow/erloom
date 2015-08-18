@@ -13,18 +13,18 @@ do_push(Entries, State = #{peers := Peers}) ->
                       send_sync(Node, #{entries => Entries}, S)
               end, State, Peers).
 
-maybe_push(State = #{edges := Edges, front := Front, peers := Peers}) ->
-    %% send sync to any peers we are ahead of, or not at all
+maybe_push(State = #{edges := Edges, front := Front, peers := Peers, opts := Opts}) ->
+    %% send sync to any peers we think we are ahead of, or not at all
+    %% we also randomly sync regardless, in case the node got replaced
     %% just include our front, no requests, no entries
-    %% how many nodes are in the cluster? should we just count #edges + 1?
-    %% just because we have logs from a node, doesn't mean its still around and/or counts
-    %% just because we have never heard from a node, doesn't mean it doesn't count
-    %% if e.g. we want to write a quorum, we need to actually know the 'right' answer
-    %% hence, we have peers, which are permanently stored in the state
+    SyncPushProb = util:get(Opts, sync_push_prob),
+    PushAnyway = random:uniform() < SyncPushProb,
     maps:fold(fun (Node, _, S) ->
                       Edge = util:get(Edges, Node, #{}),
                       case erloom:edge_delta(Front, Edge) of
                           Delta when map_size(Delta) > 0 ->
+                              send_sync(Node, #{}, S);
+                          _ when PushAnyway ->
                               send_sync(Node, #{}, S);
                           _ ->
                               S
@@ -36,12 +36,14 @@ maybe_pull(Missing, State = #{edges := Edges, front := Front}) ->
     %% we could randomly select a node that has what we need, or always ask the owner
     %% but its possible that we are the owner of a log and we don't have it (if we are reincarnated)
     %% we request it from whoever we think is furthest ahead (its ok if we are wrong or can't get it)
-    maps:fold(fun (Which, {Mark, _}, S) ->
-                      case erloom:edges_max(Which, Edges) of
+    maps:fold(fun (Node, {Mark, _}, S) ->
+                      case erloom:edges_max(Node, Edges) of
                           {undefined, undefined} ->
                               S;
-                          {Node, _Max} ->
-                              send_sync(Node, #{requests => #{Which => {Mark, undefined}}}, S)
+                          {_, Max} when Max < Mark ->
+                              S;
+                          {MaxNode, Max} ->
+                              send_sync(MaxNode, #{requests => #{Node => {Mark, Max}}}, S)
                       end
               end, State, erloom:edge_delta(Missing, Front)).
 
@@ -53,25 +55,39 @@ got_sync(Packet = #{from := {FromNode, FromPid}, front := Edge}, State) ->
     %% but if we take the edge hull, we wont realize when a node is reset
     State1 = util:modify(State, [edges, FromNode], Edge),
     State2 = util:modify(State1, [cache, FromNode], {FromPid, 0}),
-    handle_sync(Packet, State2).
+    State3 =
+        case State2 of
+            S = #{status := waiting} ->
+                case util:get(Edge, node()) of
+                    undefined ->
+                        S;
+                    _ ->
+                        %% the node knows something about our history
+                        %% we must have had a prior life, time to recover
+                        S#{status => recovering}
+                end;
+            S ->
+                S
+        end,
+    handle_sync(Packet, State3).
 
 handle_sync(Packet = #{from := {FromNode, _}, entries := Entries}, State) ->
     %% if the entries match & catch up the logs they are part of, just write them & ack
     %% otherwise keep requesting until there are no gaps and we reach the edge
     %% if replicas diverge we are screwed, but it should be impossible given our invariants
     {Reply, State1} =
-        maps:fold(fun (Which, [{{Before, _After}, _}|_] = EntryList, {R, S}) ->
-                          {Log, S1} = loom:obtain_log(Which, S),
+        maps:fold(fun (Which = {Node, IId}, [{{Before, _After}, _}|_] = EntryList, {R, S}) ->
+                          {Log, S1} = erloom_logs:obtain(Which, S),
                           case log:locus(Log) of
-                              Tip when Tip =:= Before ->
-                                  %% the logs match, just write the entries
-                                  {R, loom:extend_log(Log, EntryList, Which, S1)};
-                              Tip when Tip < Before ->
+                              Locus when Locus =:= Before ->
+                                  %% the logs match, just append the entries
+                                  {R, erloom_logs:extend(Log, EntryList, Which, S1)};
+                              Locus when Locus < Before ->
                                   %% theres a gap (or apocalypse): request to fill ourselves in
-                                  Mark = util:lookup(S1, [edges, FromNode, Which]),
-                                  R1 = util:modify(R, [requests, Which], {Tip, Mark}),
+                                  Mark = util:lookup(S1, [edges, FromNode, Node]),
+                                  R1 = util:modify(R, [requests, Node], {{IId, Locus}, Mark}),
                                   {R1, S1};
-                              Tip when Tip > Before ->
+                              Locus when Locus > Before ->
                                   %% we are ahead (or apocalypse): ignore and assume we are getting the data elsewhere
                                   {R, S1}
                           end;
@@ -81,13 +97,12 @@ handle_sync(Packet = #{from := {FromNode, _}, entries := Entries}, State) ->
     reply_sync(Packet, Reply, State1);
 handle_sync(Packet = #{requests := Requests}, State = #{opts := Opts}) ->
     %% reply with whatever entries they requested (or at least an initial subset up to limit size)
-    RangeOpts = #{limit => util:get(Opts, sync_log_limit)},
+    LogLimit = util:get(Opts, sync_log_limit),
     {Reply, State1} =
-        maps:fold(fun (Which, Range, {R, S}) ->
+        maps:fold(fun (Node, Range, {R, S}) ->
                           %% we include entries for every request, even if its empty
                           %% this ensures we are sent a reply under normal circumstances
-                          {Log, S1} = loom:obtain_log(Which, S),
-                          EntryList = log:range(Log, Range, RangeOpts),
+                          {Which, EntryList, S1} = erloom_logs:slice(LogLimit, Range, Node, S),
                           R1 = util:modify(R, [entries, Which], lists:reverse(EntryList)),
                           {R1, S1}
                   end, {#{}, State}, Requests),
@@ -96,12 +111,12 @@ handle_sync(Packet = #{sequence := 0, front := Edge}, State) ->
     %% first message has no entries or requests: its an offer to push
     %% reply with what we want them to push (or nothing, i.e. ack)
     {Reply, State1} =
-        maps:fold(fun (Which, Mark, {R, S}) ->
+        maps:fold(fun (Node, Mark, {R, S}) ->
                           %% our tip could be undefined, which is handled correctly (< Mark)
                           %% a pattern match on the Front would require an extra clause
-                          case util:lookup(S, [front, Which]) of
+                          case util:lookup(S, [front, Node]) of
                               Tip when Tip < Mark ->
-                                  R1 = util:modify(R, [requests, Which], {Tip, Mark}),
+                                  R1 = util:modify(R, [requests, Node], {Tip, Mark}),
                                   {R1, S};
                               _ ->
                                   {R, S}

@@ -21,8 +21,11 @@ pure_effects(Message, Node, State) ->
     io:format("pure effects: ~p ~p~n", [Message, Node]),
     State.
 
-side_effects(_Message, Reply, _State, State) ->
+side_effects(#{do := get_state}, Reply, _State, State) ->
     Reply(State),
+    State;
+side_effects(_Message, Reply, _State, State) ->
+    Reply(ok),
     State.
 
 write_through(#{do := get_state}, _State) ->

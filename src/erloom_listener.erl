@@ -11,20 +11,22 @@ init(Spec) ->
     State = loom:load(#{listener => Listener, worker => Worker, spec => Spec}),
     listen(catchup, State).
 
-listen(catchup, State = #{prior := _}) ->
+listen(catchup, State = #{status := ok, prior := _, emits := Emits}) ->
     %% first, give a chance for an unstable state to emit any messages to itself
     %% this will repeat until we reach a stable state
-    case loom:emit_message(State) of
-        nil ->
+    case Emits of
+        [] ->
             %% no more emissions: attempt to replay logs from point to front
             replay_logs(State);
-        Message ->
+        [{_Key, Message}|Rest] ->
             %% treat an emission as a new message to self, except noop reply
-            work_on({new_message, Message, fun (_) -> ok end}, State)
+            work_on({new_message, Message, fun (_) -> ok end}, State#{emits => Rest})
     end;
 listen(catchup, State) ->
-    %% must be the first time through, we might not be at our own tip
-    %% dont emit as we may have already done it in a previous life
+    %% if this is our first time through, we might not be at our own tip
+    %%  dont emit as we may have already done it
+    %% otherwise we might be waiting / recovering
+    %%  its not safe to our log yet in that case
     replay_logs(State);
 
 listen(ready, State = #{opts := Opts}) ->
@@ -89,8 +91,8 @@ react(ready, {new_message, Message, Reply}, State) ->
             State2 = erloom_sync:maybe_pull(Edge, State1),
             Reply({retry, {missing, Edge}}),
             listen(ready, State2);
-        {error, Reason, State1} ->
-            Reply({error, Reason}),
+        {Other, Reason, State1} ->
+            Reply({Other, Reason}),
             listen(ready, State1)
     end;
 react(ready, {sync_logs, Packet}, State) ->
@@ -101,13 +103,60 @@ react(ready, Other, State) ->
     %% we do catchup after, so new state can emit or whatever too
     listen(catchup, loom:handle_info(Other, State));
 
-react(busy, {worker_done, NewState}, State = #{ours := Ours, front := Front}) ->
-    %% listener is the authority on where all the logs are, except our own tip
-    Front1 = maps:merge(Front, maps:with([Ours], maps:get(front, NewState))),
-    State1 = maps:merge(NewState, maps:with([opts, edges], State)),
-    listen(catchup, State1#{front => Front1});
+react(busy, {worker_done, NewState}, State = #{status := ok, front := Front}) ->
+    %% if we are ok, listener is the authority on where all the logs are, except our own
+    Front1 = maps:merge(Front, maps:with([node()], maps:get(front, NewState))),
+    State1 = maps:merge(NewState, maps:with([status, opts, edges], State)),
+    State2 = State1#{front => Front1},
+    listen(catchup, State2);
+react(busy, {worker_done, NewState}, State = #{status := _, front := Front}) ->
+    %% if we are not ok yet, listener is the authority on all logs, including our own
+    State1 = maps:merge(NewState, maps:with([status, opts, edges], State)),
+    State2 = State1#{front => Front},
+    listen(catchup, check_recovery(State2));
 react(busy, {sync_logs, Packet}, State) ->
     listen(busy, erloom_sync:got_sync(Packet, State)).
+
+check_recovery(State = #{status := recovering, peers := Peers, front := Front, edges := Edges}) ->
+    %% keep recovering until:
+    %%  - we have at least one entry
+    %%  - all of our peers have edges
+    %%  - none of them are ahead on *our* logs
+    %% this means we wait for all peers to be online before we'll be ready again
+    case util:get(Front, node()) of
+        undefined ->
+            %% no entries, we should at least find a seed, otherwise we wouldn't be here
+            State;
+        OurMark ->
+            Recovered =
+                maps:fold(fun (_, _, false) ->
+                                  false;
+                              (Peer, _, true) ->
+                                  case util:get(Edges, Peer) of
+                                      undefined ->
+                                          %% no edge for the peer, we can't be sure yet
+                                          false;
+                                      Edge ->
+                                          case util:get(Edge, node()) of
+                                              Mark when Mark > OurMark ->
+                                                  %% their edge is ahead of our log
+                                                  false;
+                                              _ ->
+                                                  %% this peer looks good
+                                                  true
+                                          end
+                                  end
+                          end, true, Peers),
+            case Recovered of
+                true ->
+                    Message = #{deps => #{node() => OurMark}, type => recover},
+                    loom:charge_emit(recovered, Message, State#{status => ok});
+                false ->
+                    State
+            end
+    end;
+check_recovery(State) ->
+    State.
 
 replay_logs(State) ->
     %% only replay if the front has changed since the last time we replayed
@@ -115,7 +164,7 @@ replay_logs(State) ->
     %% this also means we implicitly prioritize replaying copied messages over receiving new ones
     case State of
         #{front := Front, prior := Front} ->
-            listen(ready, State);
+            listen(ready, check_recovery(State));
         #{front := Front} ->
             work_on(replay_logs, State#{prior => Front})
     end.
