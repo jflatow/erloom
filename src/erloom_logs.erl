@@ -66,7 +66,7 @@ load_ours(State) ->
         {false, _Log, State1} ->
             %% we wrote, we wouldn't have previously written unless we were ready before
             %% as soon as we get to the front we will be ready again
-            State1#{status => awake}
+            State1#{status => waking}
     end.
 
 path({Node, IId}, State) ->

@@ -36,8 +36,16 @@ wait() ->
             exit(Reason)
     end.
 
-done(State = #{listener := Listener}) ->
-    State1 = erloom_surety:launch_tasks(State),
+done(State = #{listener := Listener, status := Status}) ->
+    State1 =
+        case Status of
+            awake ->
+                %% only launch tasks when we are sure we are at tip
+                erloom_surety:launch_tasks(State);
+            _ ->
+                %% otherwise we'll launch tasks when we wake up
+                State
+        end,
     Listener ! {worker_done, State1},
     wait().
 

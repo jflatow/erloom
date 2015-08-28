@@ -23,9 +23,12 @@ listen(catchup, State = #{status := awake, prior := _, emits := Emits}) ->
             %% treat an emission as a new message to self, except noop reply
             work_on({new_message, Message, fun (_) -> ok end}, State#{emits => Rest})
     end;
+listen(catchup, State = #{status := waking, point := Front, front := Front}) ->
+    %% we're almost awake and we've caught up to front: finish waking up
+    listen(catchup, loom:waken(State));
 listen(catchup, State) ->
     %% if this is our first time through, we might not be at our own tip
-    %%  dont emit as we may have already done it
+    %%  dont emit or start tasks as we may have already done it
     %% otherwise we might be waiting / recovering
     %%  its not safe to write to our log yet
     replay_logs(State);
@@ -93,8 +96,10 @@ react(Phase, {get_state, Reply}, State) ->
 
 react(ready, {new_message, Message, Reply}, State) ->
     case loom:verify_message(Message, State) of
-        {ok, Message1, State1} ->
+        {ok, Message1, State1 = #{status := awake}} ->
             work_on({new_message, Message1, Reply}, State1);
+        {ok, Message1, State1 = #{status := waiting}} ->
+            work_on({new_message, Message1, Reply}, loom:waken(State1));
         {missing, Edge, State1} ->
             %% point could be behind front, or front could be missing entries
             %% but point was already pushed as far forward as possible before we became ready

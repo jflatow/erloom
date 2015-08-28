@@ -22,14 +22,14 @@
            }.
 -type message() :: #{
                deps => erloom:edge(),
-               type => start | stop | motion | ballot | move | task | term()
+               type => start | stop | motion | ballot | move | task | bar | term()
               }.
 -type reply() :: fun((term()) -> term()).
 -type state() :: #{
              listener => pid(),
              worker => pid(),
-             active => boolean(),                    %% owned by worker
-             status => awake | waiting | recovering, %% owned by listener
+             active => boolean(),                             %% owned by worker
+             status => awake | waking | waiting | recovering, %% owned by listener
              spec => spec(),
              home => path(),
              opts => opts(),
@@ -136,9 +136,10 @@
 
 -export([change_peers/2]).
 
--export([charge_emit/3,
+-export([put_barrier/2,
+         put_barrier/3,
+         charge_emit/3,
          cancel_emit/2,
-         create_task/2,
          create_task/3,
          make_motion/2]).
 
@@ -260,12 +261,11 @@ load(State = #{home := _}) ->
       tasks => #{},
       cache => #{}
      },
-    State1 = maps:merge(Defaults, kept(State)),
-    State2 = erloom_logs:load(State),
-    maps:merge(State1, State2);
+    Kept = maps:merge(Defaults, kept(State)),
+    State1 = erloom_logs:load(State),
+    maps:merge(Kept, State1);
 load(State = #{spec := Spec}) ->
-    State1 = load(State#{home => home(Spec), opts => opts(Spec)}),
-    waken(State1).
+    load(State#{home => home(Spec), opts => opts(Spec)}).
 
 sleep(State) ->
     State1 = save(State),
@@ -308,12 +308,10 @@ unmet_deps(#{deps := Deps}, #{point := Point}) ->
 unmet_deps(_Message, _State) ->
     nil.
 
-ready_to_accept(#{type := start}, #{status := awake}) ->
+ready_to_accept(#{type := start}, _State) ->
     {true, start};
-ready_to_accept(#{type := start}, #{status := waiting}) ->
-    {true, wakeup};
 ready_to_accept(_Message, #{status := awake, active := true}) ->
-    {true, ok};
+    {true, running};
 ready_to_accept(_Message, #{status := awake}) ->
     {false, stopped};
 ready_to_accept(_Message, #{status := Status}) ->
@@ -359,6 +357,8 @@ auto_effects(Message = #{type := task}, Node, State) when Node =:= node() ->
     %% task messages are for the surety to either retry or complete a task
     %% tasks run per node, transferring control is outside the scope
     erloom_surety:handle_task(Message, State);
+auto_effects(#{type := bar, key := Key}, _Node, State) ->
+    cancel_emit(Key, State);
 auto_effects(_Message, _Node, State) ->
     State.
 
@@ -420,15 +420,20 @@ change_peers({remove, [Node|Rest]}, State) ->
 change_peers({_, []}, State) ->
     State.
 
+put_barrier(Key, State = #{point := Point}) ->
+    %% often the current point is as good of a sync point as any
+    put_barrier(Key, Point, State).
+
+put_barrier(Key, Deps, State) ->
+    %% a simple barrier message, generally has some deps on a sync point
+    %% also has a key to prevent from emitting again
+    charge_emit(Key, #{type => bar, deps => Deps, key => Key}, State).
+
 charge_emit(Key, Message, State = #{emits := Emits}) ->
     State#{emits => util:set(Emits, Key, Message)}.
 
 cancel_emit(Key, State = #{emits := Emits}) ->
     State#{emits => util:delete(Emits, Key)}.
-
-create_task(Task, State = #{locus := Locus}) ->
-    %% NB: custom keys are required to create more than one task per message
-    create_task(erloom:locus_after(Locus), Task, State).
 
 create_task(Key, Task, State) ->
     %% tasks have similar "defer until tip" semantics as emit messages

@@ -126,7 +126,7 @@ vote(MotionId, Vote, State) ->
     Ballot = #{type => ballot, deps => MotionId, vote => Vote},
     loom:charge_emit({ballot, MotionId}, Ballot, State).
 
-affirm_config(#{deps := ConfId, type := Type}, Node, State) ->
+affirm_config(#{type := Type, deps := ConfId}, Node, State) ->
     %% when a conf changes the peer group, we keep a list of nodes that need start / stop
     %% when we see that a node references the conf, with a start or stop, we remove it from the list
     case util:lookup(State, [elect, ConfId]) of
@@ -294,7 +294,9 @@ reflect_decision(MotionId, {Kids, Motion, _}, Decision = {true, _}, State = #{el
                 %% if the current belief is not a descendant of known, change it
                 %% any conf siblings must be killed, there can only be one
                 %% the peer group should be updated to support the electorate
-                %% NB: peer change only works for fully connected peer group and 1 electorate
+                %% also, we must charge emit a message with deps on the ratifying votes (if any)
+                %% this keeps the guarantee that subsets of our log determine the peer group for writing
+                %% our Point is at least past the ratifying votes, so that will do
                 MotionInfo = {Kids, Motion, {ratified, undefined}},
                 Elect1 = Elect#{known => MotionId, MotionId => MotionInfo},
                 Elect2 =
@@ -306,7 +308,8 @@ reflect_decision(MotionId, {Kids, Motion, _}, Decision = {true, _}, State = #{el
                     end,
                 S1 = State#{elect => Elect2},
                 S2 = murder_conf_siblings(MotionId, S1),
-                update_conf_peers(MotionId, MotionInfo, S2);
+                S3 = update_conf_peers(MotionId, MotionInfo, S2),
+                loom:put_barrier({conf, MotionId}, S3);
             _ ->
                 %% the motion was not a conf change, no need to keep it around
                 State#{elect => util:delete(Elect, MotionId)}
@@ -352,22 +355,27 @@ murder_conf_siblings(ConfId, State) ->
                 end, State, get_siblings(ConfId, State)).
 
 update_conf_peers(ConfId, {Kids, Conf = #{conf := Change}, {ratified, undefined}}, State) ->
-    %% only the node that makes the motion to change will try to start / stop the nodes
-    %% this is a single point of failure for changing the group, currently
-    %% in theory other nodes could try to exert control if they think something is wrong, as the info is shared
+    %% change the peer group, and start / stop nodes that are added / removed
+    %% initiate a sync right away to cut down on chance that deps will be missing
+    %% NB: implementation assumes fully connected peer group and a single electorate
+    %%     its possible, but complicated, to support multiple electorates and asymmetric peers
     State1 = loom:change_peers(Change, State),
     Old = maps:keys(util:get(State, peers)),
     New = maps:keys(util:get(State1, peers)),
     State2 = util:modify(State1, [elect, ConfId], {Kids, Conf, {ratified, {New -- Old, Old -- New}}}),
+    State3 = erloom_sync:maybe_push(State2),
     case get_mover(ConfId) of
         Node when Node =:= node() ->
-            loom:create_task({fun control_conf_peers/2, ConfId}, State2);
+            %% only the node that makes the motion to change will try to start / stop the nodes
+            %% this is a single point of failure for changing the group, currently
+            %% in theory other nodes could try to exert control if they think something is wrong
+            loom:create_task({conf, ConfId}, {fun control_conf_peers/2, ConfId}, State3);
         _ ->
-            State2
+            State3
     end.
 
 control_conf_peers(ConfId, State = #{spec := Spec}) ->
-    %% the first try will generally reach the targets before the deps and fail
+    %% the first try may reach the targets before the deps and fail
     %% its fine, we'll just retry, these messages are relatively uncommon anyway
     case ready_to_control(ConfId, State) of
         {true, Pending} ->
@@ -375,9 +383,11 @@ control_conf_peers(ConfId, State = #{spec := Spec}) ->
                 {[], []} ->
                     {done, {?MODULE, conf, ConfId}};
                 {Start, Stop} ->
+                    %% give the sync a little bit of a chance to work by waiting a sec
+                    receive after 1000 -> ok end,
                     _ = loom:multicall(Start, [Spec, #{deps => ConfId, type => start}]),
                     _ = loom:multicall(Stop, [Spec, #{deps => ConfId, type => stop}]),
-                    {retry, {10, seconds}}
+                    {retry, {15, seconds}}
             end;
         {false, not_ready} ->
             {retry, {60, seconds}};

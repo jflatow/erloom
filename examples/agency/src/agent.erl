@@ -15,8 +15,10 @@ home({agent, Name}) ->
 
 opts({agent, _}) ->
     #{
-      idle_timeout => 60000,
-      sync_interval => 3000 + random:uniform(3000)
+      idle_timeout => time:timeout({5, minutes}),
+      sync_interval => 3000 + random:uniform(3000),
+      sync_push_prob => 0.5,
+      unanswered_max => 1
      }.
 
 write_through(#{do := get_state}, _State) ->
@@ -28,8 +30,20 @@ write_through(_Message, _State) ->
 
 pure_effects(#{do := save}, _Node, State) ->
     loom:save(State);
+pure_effects(#{type := start}, Node, State) ->
+    io:format("~p started~n", [Node]),
+    State;
+pure_effects(#{type := stop}, Node, State) ->
+    io:format("~p stopped~n", [Node]),
+    State;
+pure_effects(#{type := task, key := Key, done := _}, Node, State) ->
+    io:format("~p completed task ~p~n", [Node, Key]),
+    State;
+pure_effects(#{type := bar}, Node, State) ->
+    io:format("~p put a sync barrier~n", [Node]),
+    State;
 pure_effects(Message, Node, State) ->
-    io:format("pure effects: ~p ~p~n", [Message, Node]),
+    io:format("pure effects: ~p ~p~n", [maps:without([deps], Message), Node]),
     State.
 
 side_effects(#{do := get_state}, Reply, _State, State) ->
