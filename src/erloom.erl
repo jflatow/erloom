@@ -3,6 +3,7 @@
 -export_type([logid/0,
               mark/0,
               which/0,
+              locus/0,
               range/0,
               delta/0,
               edge/0,
@@ -13,6 +14,7 @@
 -type logid() :: binary().
 -type mark() :: {logid(), log:mark()}.
 -type which() :: {node(), logid()}.
+-type locus() :: {which(), log:range()}.
 -type range() :: {mark() | undefined, mark()}.
 -type delta() :: #{node() => range()}.
 -type edge() :: #{node() => mark()}.
@@ -20,6 +22,8 @@
 -type entries() :: #{which() => [log:entry()]}.
 -type logs() :: #{which() => log:log()}.
 
+-spec locus_before(locus()) -> edge().
+-spec locus_after(locus()) -> edge().
 -spec delta_lower(delta()) -> edge().
 -spec delta_upper(delta()) -> edge().
 -spec edge_delta(edge(), edge()) -> delta().
@@ -36,7 +40,9 @@
 -define(Child(Mod, Args, Type), {Mod, {Mod, start, Args}, permanent, 5000, Type, [Mod]}).
 -define(Children, [?Child(erloom_registry, [], worker)]).
 
--export([delta_lower/1,
+-export([locus_before/1,
+         locus_after/1,
+         delta_lower/1,
          delta_upper/1,
          edge_delta/2,
          edge_hull/2,
@@ -73,6 +79,12 @@ init([]) ->
     {ok, {{one_for_one, ?MaxRestarts, ?MaxRestartWindow}, ?Children}}.
 
 %% erloom
+
+locus_before({{Node, IId}, {Before, _}}) ->
+    #{Node => {IId, Before}}.
+
+locus_after({{Node, IId}, {_, After}}) ->
+    #{Node => {IId, After}}.
 
 delta_lower(D) ->
     util:map(D, fun ({L, _}) -> L end).

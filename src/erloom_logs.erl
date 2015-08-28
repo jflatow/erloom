@@ -3,6 +3,7 @@
 -export([load/1,
          path/2,
          empty/2,
+         close/1,
          obtain/2,
          extend/4,
          replay/4,
@@ -60,12 +61,12 @@ load_ours(State) ->
     case empty(Ours, State#{ours => Ours}) of
         {true, _Log, State1} ->
             %% we never wrote, maybe we died trying, maybe we were never started
-            %% we must wait to recover or be seeded before we can write to our log
+            %% we must wait to recover or be started before we can write to our log
             State1#{status => waiting};
         {false, _Log, State1} ->
             %% we wrote, we wouldn't have previously written unless we were ready before
             %% as soon as we get to the front we will be ready again
-            State1#{status => ok}
+            State1#{status => awake}
     end.
 
 path({Node, IId}, State) ->
@@ -93,6 +94,10 @@ empty(Which, State) ->
     {Log, State1} = obtain(Which, State),
     {log:first(Log) =:= undefined, Log, State1}.
 
+close(State = #{logs := Logs}) ->
+    maps:fold(fun (_, Log, _) -> log:close(Log) end, nil, Logs),
+    util:delete(State, logs).
+
 %% get a handle for a log, whether we have it yet or not
 
 obtain(Which, State = #{logs := Logs}) ->
@@ -112,9 +117,11 @@ replay(Fun, {{AId, A}, {AId, B}}, Node, State) ->
     {Log, State1} = obtain({Node, AId}, State),
     {{_, After}, State2 = #{point := Point}} =
         log:bendl(Log,
-                  fun ({{Before, _}, Data}, S = #{point := P}) ->
+                  fun ({{Before, _} = Range, Data}, S = #{point := P}) ->
                           %% NB: we mark Before in case Fun decides to exit early
-                          Fun(binary_to_term(Data), Node, S#{point => P#{Node => {AId, Before}}})
+                          P1 = P#{Node => {AId, Before}},
+                          S1 = S#{point => P1, locus => {{Node, AId}, Range}},
+                          Fun(binary_to_term(Data), Node, S1)
                   end, State1, {A, B}),
     State2#{point => Point#{Node => {AId, After}}};
 replay(Fun, {{AId, A}, {BId, B}}, Node, State) when AId < BId ->
@@ -154,6 +161,10 @@ extend(_, [], _, State) ->
 write(Message, State) when is_map(Message) ->
     write(term_to_binary(Message), State);
 write(Data, State = #{ours := Ours = {Node, IId}, front := Front}) ->
+    %% we assume we are caught up, otherwise we shouldn't be writing
+    %% thus locus needs to span the new entry
     {Log, State1} = obtain(Ours, State),
     {ok, {_, After} = Range} = log:write(Log, Data),
-    {[{Range, Data}], State1#{front => Front#{Node => {IId, After}}}}.
+    {[{Range, Data}],
+     State1#{front => Front#{Node => {IId, After}},
+             locus => {Ours, Range}}}.

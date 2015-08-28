@@ -7,6 +7,9 @@
          send_sync/3,
          trap_sync/2]).
 
+delegate(#{listener := Listener}) ->
+    {node(), Listener}.
+
 do_push(Entries, State = #{peers := Peers}) ->
     %% definitely push entries to all peers (i.e. for writing)
     maps:fold(fun (Node, _, S) ->
@@ -79,15 +82,15 @@ handle_sync(Packet = #{from := {FromNode, _}, entries := Entries}, State) ->
         maps:fold(fun (Which = {Node, IId}, [{{Before, _After}, _}|_] = EntryList, {R, S}) ->
                           {Log, S1} = erloom_logs:obtain(Which, S),
                           case log:locus(Log) of
-                              Locus when Locus =:= Before ->
+                              Pos when Pos =:= Before ->
                                   %% the logs match, just append the entries
                                   {R, erloom_logs:extend(Log, EntryList, Which, S1)};
-                              Locus when Locus < Before ->
+                              Pos when Pos < Before ->
                                   %% theres a gap (or apocalypse): request to fill ourselves in
                                   Mark = util:lookup(S1, [edges, FromNode, Node]),
-                                  R1 = util:modify(R, [requests, Node], {{IId, Locus}, Mark}),
+                                  R1 = util:modify(R, [requests, Node], {{IId, Pos}, Mark}),
                                   {R1, S1};
-                              Locus when Locus > Before ->
+                              Pos when Pos > Before ->
                                   %% we are ahead (or apocalypse): ignore and assume we are getting the data elsewhere
                                   {R, S1}
                           end;
@@ -139,7 +142,7 @@ send_sync(Node, Packet = #{sequence := N}, State = #{front := Front, opts := Opt
     %% if we don't have a pid, we consider that there might be something wrong with the node
     UnansweredMax = util:get(Opts, unanswered_max),
     Increment = 1 - N rem 2, %% only even numbered packets expect a reply
-    Packet1 = Packet#{from => loom:delegate(State), front => Front},
+    Packet1 = Packet#{from => delegate(State), front => Front},
     State1 =
         case util:lookup(State, [cache, Node], {undefined, 0}) of
             {undefined, Unanswered} when Unanswered + Increment > UnansweredMax ->

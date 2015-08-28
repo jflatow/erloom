@@ -3,11 +3,17 @@
 -export([spawn/0]).
 
 spawn() ->
-    spawn_link(fun () -> wait() end).
+    spawn_link(fun () -> init() end).
+
+init() ->
+    process_flag(trap_exit, true),
+    wait().
 
 wait() ->
     receive
         {{new_message, Message, Reply}, State} ->
+            %% writing to peers before updating is not arbitrary
+            %% log prefix tells who could have been written to next
             State1 = write_through(Message, State),
             State2 = loom:pure_effects(Message, node(), State1),
             State3 = point_to_front(node(), State2),
@@ -18,11 +24,21 @@ wait() ->
             done(State1);
         {sync_logs, _} ->
             %% flush extraneous messages while we are not waiting for acks
-            wait()
+            wait();
+        {'EXIT', _, normal} ->
+            %% normal exits trap normally
+            wait();
+        {'EXIT', _, silent} ->
+            %% trap exits to allow children (tasks) to be killed quietly
+            wait();
+        {'EXIT', _, Reason} ->
+            %% all other exits happen as if we weren't trapping
+            exit(Reason)
     end.
 
 done(State = #{listener := Listener}) ->
-    Listener ! {worker_done, State},
+    State1 = erloom_surety:launch_tasks(State),
+    Listener ! {worker_done, State1},
     wait().
 
 point_to_front(Node, State) ->
