@@ -1,0 +1,24 @@
+#!/usr/bin/env escript
+%% -*- erlang -*-
+
+add_paths() ->
+    RelPath = filename:dirname(filename:dirname(escript:script_name())),
+    code:add_paths([RelPath ++ "/ebin",
+                    RelPath ++ "/deps/erlkit/ebin"]).
+
+main(Homes) ->
+    add_paths(),
+    lists:foldl(fun (H, _) -> lcat(H) end, nil, Homes).
+
+lcat(Home) ->
+    erloom_logs:fold(
+      fun (Message, Node, _) ->
+              Vals =
+                  maps:fold(fun (K, V, A) ->
+                                    [io_lib:format("~s=~1024p", [K, V])|A]
+                            end, [], maps:without([type, deps], Message)),
+              Type = util:get(Message, type, "-"),
+              Deps = util:get(Message, deps, #{}),
+              Line = util:join(Vals, "\t"),
+              io:format("~s\t~s\t~B\t~s~n", [Node, Type, map_size(Deps), Line])
+      end, nil, Home).

@@ -5,19 +5,29 @@
          empty/2,
          close/1,
          obtain/2,
-         extend/4,
+         fold/3,
+         fold/4,
+         range/1,
+         range/2,
+         replay/3,
          replay/4,
          slice/4,
+         extend/4,
          write/2]).
 
-load(State = #{ours := _, logs := _, front := _}) ->
-    lists:foldl(fun (NodePath, S) ->
-                        Node = util:atom(url:unescape(filename:basename(NodePath))),
-                        IIds = [util:bin(I) || I <- lists:reverse(path:ls(NodePath))],
-                        load_node(Node, IIds, S)
-                end, State, path:list(loom:path(logs, State)));
 load(State) ->
-    load(load_ours(State#{logs => #{}, front => #{}})).
+    load_ours(load_logs(State)).
+
+load_logs(State) ->
+    load_logs(path:list(loom:path(logs, State)), State#{logs => #{}, front => #{}}).
+
+load_logs(NodePaths, State) ->
+    lists:foldl(fun load_node/2, State, NodePaths).
+
+load_node(NodePath, State) ->
+    Node = util:atom(url:unescape(filename:basename(NodePath))),
+    IIds = [util:bin(I) || I <- lists:reverse(path:ls(NodePath))],
+    load_node(Node, IIds, State).
 
 load_node(Node, [IId|Rest], State = #{front := Front}) ->
     case empty({Node, IId}, State) of
@@ -109,7 +119,63 @@ obtain(Which, State = #{logs := Logs}) ->
             {Log, State}
     end.
 
-%% fold through a range, accumulating into state
+%% fold logs in a more traditional way, using state or home (not used internally)
+
+fold(Fun, Acc, State) ->
+    fold(Fun, Acc, {undefined, undefined}, State).
+
+fold(Fun, Acc, {Start, Stop}, State = #{logs := _, front := Front}) ->
+    State1 = State#{acc => Acc, point => util:def(Start, #{})},
+    State2 = replay(fun (Message, Node, S = #{acc := A}) ->
+                            S#{acc => Fun(Message, Node, A)}
+                    end, [util:def(Stop, Front)], State1),
+    util:get(State2, acc);
+fold(Fun, Acc, Range, Home) ->
+    fold(Fun, Acc, Range, load_logs(#{home => Home})).
+
+%% dump logs to a list (e.g. for dev or debugging)
+
+range(StateOrHome) ->
+    range({undefined, undefined}, StateOrHome).
+
+range(Range, StateOrHome) ->
+    fold(fun (M, N, A) -> [{N, M}|A] end, [], Range, StateOrHome).
+
+%% replay all logs, ensuring each target one at a time or failing
+
+replay(Fun, [Target|Stack], State = #{point := Point, front := Front}) ->
+    Replay =
+        fun (Message, Node, S) ->
+                case loom:unmet_deps(Message, S) of
+                    nil ->
+                        Fun(Message, Node, S);
+                    Deps ->
+                        replay(Fun, [Deps, Target], S)
+                end
+        end,
+    State1 =
+        case erloom:edge_delta(Target, Point) of
+            TP when map_size(TP) > 0 ->
+                %% target is ahead of point: try to reach it
+                case erloom:edge_delta(Target, Front) of
+                    TF when map_size(TF) > 0 ->
+                        %% target is unreachable: stop
+                        throw({unreachable, Target, State});
+                    _ ->
+                        %% target is contained in front
+                        maps:fold(fun (Node, Range, S) ->
+                                          replay(Replay, Range, Node, S)
+                                  end, State, TP)
+                end;
+            _ ->
+                %% target is reached
+                State
+        end,
+    replay(Fun, Stack, State1);
+replay(_, [], State) ->
+    State.
+
+%% replay a single node range, accumulating into state
 
 replay(Fun, {undefined, {BId, B}}, Node, State) ->
     replay(Fun, {{first_id(Node, State), undefined}, {BId, B}}, Node, State);

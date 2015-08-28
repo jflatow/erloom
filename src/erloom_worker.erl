@@ -57,45 +57,14 @@ replay_logs(State = #{front := Front}) ->
         %% try to replay to front, recursively adding deps as needed
         %% recursion depth is practically bound by the number of nodes
         %% if we don't target our own front first, its not guaranteed we will reach it
-        replay_logs([maps:with([node()], Front), maps:without([node()], Front)], State)
+        Targets = [maps:with([node()], Front), maps:without([node()], Front)],
+        erloom_logs:replay(fun loom:pure_effects/3, Targets, State)
     catch
         %% if we can't go any further, try to resolve the problem quickly
         %% in the meantime just return as far as we get
         throw:{unreachable, Target, State1} ->
             erloom_sync:maybe_pull(Target, State1)
     end.
-
-replay_logs([Target|Stack], State = #{point := Point, front := Front}) ->
-    Replay =
-        fun (Message, Node, S) ->
-                case loom:unmet_deps(Message, S) of
-                    nil ->
-                        loom:pure_effects(Message, Node, S);
-                    Deps ->
-                        replay_logs([Deps, Target], S)
-                end
-        end,
-    State1 =
-        case erloom:edge_delta(Target, Point) of
-            TP when map_size(TP) > 0 ->
-                %% target is ahead of point: try to reach it
-                case erloom:edge_delta(Target, Front) of
-                    TF when map_size(TF) > 0 ->
-                        %% target is unreachable: stop
-                        throw({unreachable, Target, State});
-                    _ ->
-                        %% target is contained in front
-                        maps:fold(fun (Node, Range, S) ->
-                                          erloom_logs:replay(Replay, Range, Node, S)
-                                  end, State, TP)
-                end;
-            _ ->
-                %% target is reached
-                State
-        end,
-    replay_logs(Stack, State1);
-replay_logs([], State) ->
-    State.
 
 write_through(Message, State) ->
     write_through(loom:write_through(Message, State), Message, State).
