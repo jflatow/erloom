@@ -2,6 +2,8 @@
 
 %% The registry is started when erloom is run as an application.
 %% This is the default usage, and by default looms use it to find or spawn pids.
+%% Ids that are atoms use the builtin erlang registry and do not require the gen_server.
+%% However, the default implementation of proc for looms do not use atom ids.
 
 -behavior(gen_server).
 -export([start/0]).
@@ -29,7 +31,7 @@ handle_call(state, _From, State) ->
 handle_call({proc, Id, Spec}, _From, #state{looms=Looms} = State) ->
     case maps:find(Id, Looms) of
         {ok, Pid} ->
-                {reply, Pid, State};
+            {reply, Pid, State};
         error ->
             case erloom_listener:spawn(Spec) of
                 Pid when is_pid(Pid) ->
@@ -64,5 +66,20 @@ erase_(IdOrPid, State = #state{looms=Looms}) ->
 
 %% registry interface
 
+proc(Id, Spec) when is_atom(Id) ->
+    case whereis(Id) of
+        undefined ->
+            try
+                Pid = erloom_listener:spawn(Spec),
+                register(Id, Pid),
+                unlink(Pid),
+                Pid
+            catch
+                error:badarg ->
+                    proc(Id, Spec)
+            end;
+        Pid ->
+            Pid
+    end;
 proc(Id, Spec) ->
     gen_server:call(?MODULE, {proc, Id, Spec}).

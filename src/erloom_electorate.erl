@@ -381,7 +381,7 @@ control_conf_peers(ConfId, State = #{spec := Spec}) ->
         {true, Pending} ->
             case Pending of
                 {[], []} ->
-                    {done, {?MODULE, conf, ConfId}};
+                    {done, ok};
                 {Start, Stop} ->
                     %% give the sync a little bit of a chance to work by waiting a sec
                     receive after 1000 -> ok end,
