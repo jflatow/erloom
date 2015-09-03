@@ -3,7 +3,7 @@
 -behavior(loom).
 -export([home/1,
          opts/1,
-         write_through/2,
+         write_through/3,
          pure_effects/3,
          side_effects/4,
          vote_on_motion/3,
@@ -21,11 +21,11 @@ opts({agent, _}) ->
       unanswered_max => 1
      }.
 
-write_through(#{do := get_state}, _State) ->
+write_through(#{do := get_state}, _N, _State) ->
     {0, infinity};
-write_through(#{write := N}, _State) when is_integer(N) ->
-    {N, 1000};
-write_through(_Message, _State) ->
+write_through(#{write := W}, _N, _State) when is_integer(W) ->
+    {W, 1000};
+write_through(_Message, _N, _State) ->
     {1, infinity}.
 
 pure_effects(#{do := save}, _Node, State) ->

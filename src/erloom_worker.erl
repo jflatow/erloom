@@ -66,11 +66,9 @@ replay_logs(State = #{front := Front}) ->
             erloom_sync:maybe_pull(Target, State1)
     end.
 
-write_through(Message, State) ->
-    write_through(loom:write_through(Message, State), Message, State).
+write_through(Message, State = #{peers := Peers}) ->
+    write_through(loom:write_through(Message, map_size(Peers) + 1, State), Message, State).
 
-write_through(Fun, Message, State = #{peers := Peers}) when is_function(Fun) ->
-    write_through(Fun(map_size(Peers)), Message, State);
 write_through({W, T}, Message, State = #{peers := Peers, ours := Ours}) when W > 0 ->
     %% write to our own log, and push the entries right away
     {EntryList, State1} = erloom_logs:write(Message, State),

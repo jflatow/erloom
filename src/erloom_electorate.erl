@@ -312,21 +312,30 @@ reflect_decision(MotionId, {Kids, Motion, _}, Decision = {true, _}, State = #{el
                 loom:put_barrier({conf, MotionId}, S3);
             _ ->
                 %% the motion was not a conf change, no need to keep it around
-                State#{elect => util:delete(Elect, MotionId)}
+                util:remove(State, [elect, MotionId])
         end,
     State2 = loom:motion_decided(Motion, Mover, Decision, State1),
-    lists:foldl(fun (Kid, S) ->
-                        reckon_elections(Kid, util:get(Elect, Kid), S)
+    lists:foldl(fun (Kid, S = #{elect := E}) ->
+                        reckon_elections(Kid, util:get(E, Kid), S)
                 end, State2, Kids);
 reflect_decision(MotionId, {Kids, Motion, _}, Decision, State = #{elect := Elect}) ->
     %% notify the loom, and recursively reflect any dependent motions
     %% no need to keep any definitely false motions
     Mover = get_mover(MotionId),
-    State1 = State#{elect => util:delete(Elect, MotionId)},
-    State2 = loom:motion_decided(Motion, Mover, Decision, State1),
-    lists:foldl(fun (Kid, S) ->
-                        reflect_decision(Kid, util:get(Elect, Kid), {false, premise}, S)
-                end, State2, Kids).
+    State1 =
+        case util:get(Elect, current) of
+            MotionId ->
+                %% we believed the failed motion was the current conf, revert to last known
+                State#{elect => Elect#{current => util:get(Elect, known)}};
+            _ ->
+                %% not the current conf and we didn't believe it was
+                State
+        end,
+    State2 = util:remove(State1, [elect, MotionId]),
+    State3 = loom:motion_decided(Motion, Mover, Decision, State2),
+    lists:foldl(fun (Kid, S = #{elect := E}) ->
+                        reflect_decision(Kid, util:get(E, Kid), {false, premise}, S)
+                end, State3, Kids).
 
 tally_votes(_MotionId, {_, Motion, Votes}, State) ->
     case lists:foldl(fun (Member, {N, P, F}) ->
@@ -341,7 +350,7 @@ tally_votes(_MotionId, {_, Motion, Votes}, State) ->
                      end, {0, 0, 0}, get_electorate(Motion, State)) of
         {N, P, _} when P > N div 2 ->
             {true, majority};
-        {N, _, F} when F > N div 2 ->
+        {N, _, F} when F >= N div 2 ->
             {false, majority};
         _ ->
             undefined

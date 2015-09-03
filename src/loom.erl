@@ -73,9 +73,8 @@
     {ok, message(), state()} |
     {missing, erloom:edge(), state()} |
     {term(), term(), state()}.
--callback write_through(message(), state()) ->
-    {non_neg_integer(), non_neg_integer()} |
-    fun((pos_integer()) -> {non_neg_integer(), non_neg_integer()}).
+-callback write_through(message(), pos_integer(), state()) ->
+    {non_neg_integer(), non_neg_integer()}.
 -callback pure_effects(message(), node(), state()) -> state().
 -callback side_effects(message(), reply(), state(), state()) -> state().
 -callback vote_on_motion(motion(), node(), state()) -> vote().
@@ -89,7 +88,7 @@
                      keep/1,
                      waken/1,
                      verify_message/2,
-                     write_through/2,
+                     write_through/3,
                      pure_effects/3,
                      side_effects/4,
                      vote_on_motion/3,
@@ -122,7 +121,7 @@
          stop/2,
          unmet_deps/2,
          verify_message/2,
-         write_through/2,
+         write_through/3,
          pure_effects/3,
          side_effects/4,
          vote_on_motion/3,
@@ -139,6 +138,7 @@
 -export([put_barrier/2,
          put_barrier/3,
          charge_emit/3,
+         charge_emit/4,
          cancel_emit/2,
          create_task/3,
          make_motion/2]).
@@ -334,9 +334,9 @@ verify_message(Message, State = #{spec := Spec}) ->
             {retry, Status, State}
     end.
 
-write_through(Message, State = #{spec := Spec}) ->
+write_through(Message, N, State = #{spec := Spec}) ->
     %% how many copies of a message are required for a successful write? in what timeframe?
-    callback(Spec, {write_through, 2}, [Message, State], {1, infinity}).
+    callback(Spec, {write_through, 3}, [Message, N, State], {1, infinity}).
 
 auto_effects(#{type := start, seed := Nodes}, Node, State) ->
     %% the seed message sets the initial electorate, and thus the peer group
@@ -429,8 +429,11 @@ put_barrier(Key, Deps, State) ->
     %% also has a key to prevent from emitting again
     charge_emit(Key, #{type => bar, deps => Deps, key => Key}, State).
 
-charge_emit(Key, Message, State = #{emits := Emits}) ->
-    State#{emits => util:set(Emits, Key, Message)}.
+charge_emit(Key, Message, State) ->
+    charge_emit(Key, Message, fun (_) -> ok end, State).
+
+charge_emit(Key, Message, Reply, State = #{emits := Emits}) ->
+    State#{emits => util:set(Emits, Key, {Message, Reply})}.
 
 cancel_emit(Key, State = #{emits := Emits}) ->
     State#{emits => util:delete(Emits, Key)}.

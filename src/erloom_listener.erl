@@ -19,9 +19,9 @@ listen(catchup, State = #{status := awake, prior := _, emits := Emits}) ->
         [] ->
             %% no more emissions: attempt to replay logs from point to front
             replay_logs(State);
-        [{_Key, Message}|Rest] ->
-            %% treat an emission as a new message to self, except noop reply
-            work_on({new_message, Message, fun (_) -> ok end}, State#{emits => Rest})
+        [{_Key, {Message, Reply}}|Rest] ->
+            %% treat an emission as a new message to self
+            work_on({new_message, Message, Reply}, State#{emits => Rest})
     end;
 listen(catchup, State = #{status := waking, point := Front, front := Front}) ->
     %% we're almost awake and we've caught up to front: finish waking up
