@@ -14,11 +14,10 @@ wait() ->
         {{new_message, Message, Reply}, State} ->
             %% writing to peers before updating is not arbitrary
             %% log prefix tells who could have been written to next
-            State1 = write_through(Message, State),
-            State2 = loom:pure_effects(Message, node(), State1),
-            State3 = point_to_front(node(), State2),
-            State4 = loom:side_effects(Message, Reply, State1, State3),
-            done(State4);
+            State1 = write_through(Message, util:set(State, incoming, {Message, Reply})),
+            State2 = loom:handle_message(Message, node(), State1),
+            State3 = point_to_front(node(), util:delete(State2, incoming)),
+            done(State3);
         {replay_logs, State} ->
             State1 = replay_logs(State),
             done(State1);
@@ -58,7 +57,7 @@ replay_logs(State = #{front := Front}) ->
         %% recursion depth is practically bound by the number of nodes
         %% if we don't target our own front first, its not guaranteed we will reach it
         Targets = [maps:with([node()], Front), maps:without([node()], Front)],
-        erloom_logs:replay(fun loom:pure_effects/3, Targets, State)
+        erloom_logs:replay(fun loom:handle_message/3, Targets, State)
     catch
         %% if we can't go any further, try to resolve the problem quickly
         %% in the meantime just return as far as we get

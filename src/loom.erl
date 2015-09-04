@@ -45,7 +45,9 @@
              cache => #{node() => {pid() | undefined, non_neg_integer()}},
              elect => #{},
              emits => [{term(), message()}],
-             tasks => #{term() => {pid() | undefined, {module(), atom(), list()}}}
+             tasks => #{term() => {pid() | undefined, {module(), atom(), list()}}},
+             deferred => #{term() => function()},
+             incoming => {message(), function()} | undefined
             }.
 
 -type vote() :: {yea, term()} | {nay, term()}.
@@ -75,8 +77,7 @@
     {term(), term(), state()}.
 -callback write_through(message(), pos_integer(), state()) ->
     {non_neg_integer(), non_neg_integer()}.
--callback pure_effects(message(), node(), state()) -> state().
--callback side_effects(message(), reply(), state(), state()) -> state().
+-callback handle_message(message(), node(), state()) -> state().
 -callback vote_on_motion(motion(), node(), state()) -> vote().
 -callback motion_decided(motion(), node(), decision(), state()) -> state().
 -callback handle_info(term(), state()) -> state().
@@ -89,8 +90,7 @@
                      waken/1,
                      verify_message/2,
                      write_through/3,
-                     pure_effects/3,
-                     side_effects/4,
+                     handle_message/3,
                      vote_on_motion/3,
                      motion_decided/4,
                      handle_info/2,
@@ -119,11 +119,15 @@
          waken/1,
          start/2,
          stop/2,
+         is_incoming/2,
+         defer_reply/1,
+         defer_reply/2,
+         maybe_reply/2,
+         maybe_reply/3,
          unmet_deps/2,
          verify_message/2,
          write_through/3,
-         pure_effects/3,
-         side_effects/4,
+         handle_message/3,
          vote_on_motion/3,
          motion_decided/4,
          handle_info/2,
@@ -259,7 +263,8 @@ load(State = #{home := _}) ->
       peers => #{},
       emits => [],
       tasks => #{},
-      cache => #{}
+      cache => #{},
+      deferred => #{}
      },
     Kept = maps:merge(Defaults, kept(State)),
     State1 = erloom_logs:load(State),
@@ -297,6 +302,47 @@ stop(Node, State) when Node =:= node() ->
     State1#{active => false};
 stop(_, State) ->
     State.
+
+is_incoming(Message, #{incoming := {Message, _}}) ->
+    true;
+is_incoming(_, _) ->
+    false.
+
+defer_reply(State = #{locus := Locus}) ->
+    defer_reply(erloom:locus_after(Locus), State).
+
+defer_reply(Key, State = #{deferred := Deferred, incoming := {_, Reply}}) ->
+    %% defer the incoming reply, if any
+    %% now someone can reply later using the key
+    %% deferred replies are transient, they aren't saved in the state
+    State#{deferred => util:set(Deferred, Key, Reply)};
+defer_reply(_, State) ->
+    State.
+
+maybe_reply(Response, State = #{incoming := {_, Reply}}) ->
+    %% the default is to try and reply to the incoming message
+    maybe_reply(Reply, Response, State);
+maybe_reply(_, State) ->
+    State.
+
+maybe_reply(undefined, _, State) ->
+    State;
+maybe_reply(#{type := motion, key := Key}, Response, State) ->
+    %% replying to a motion means replying to the motion key
+    maybe_reply(Key, Response, State);
+maybe_reply(Reply, Response, State) when is_function(Reply) ->
+    Reply(Response),
+    State;
+maybe_reply(Key, Response, State = #{deferred := Deferred}) ->
+    %% try and reply to the deferred reply under the key
+    %% once the reply is used it gets deleted
+    %% we could also keep a counter if we need to call more than once
+    case util:get(Deferred, Key) of
+        undefined ->
+            State;
+        Reply ->
+            maybe_reply(Reply, Response, util:remove(State, [deferred, Key]))
+    end.
 
 unmet_deps(#{deps := Deps}, #{point := Point}) ->
     case erloom:edge_delta(Deps, Point) of
@@ -338,43 +384,37 @@ write_through(Message, N, State = #{spec := Spec}) ->
     %% how many copies of a message are required for a successful write? in what timeframe?
     callback(Spec, {write_through, 3}, [Message, N, State], {1, infinity}).
 
-auto_effects(#{type := start, seed := Nodes}, Node, State) ->
+handle_builtin(#{type := start, seed := Nodes}, Node, State) ->
     %% the seed message sets the initial electorate, and thus the peer group
     %% every node in the group should see / refer to the same seed message
     erloom_electorate:create(Nodes, start(Node, State));
-auto_effects(Message = #{type := start}, Node, State) ->
+handle_builtin(Message = #{type := start}, Node, State) ->
     erloom_electorate:affirm_config(Message, Node, start(Node, State));
-auto_effects(Message = #{type := stop}, Node, State) ->
+handle_builtin(Message = #{type := stop}, Node, State) ->
     erloom_electorate:affirm_config(Message, Node, stop(Node, State));
-auto_effects(Message = #{type := motion}, Node, State) ->
+handle_builtin(Message = #{type := motion}, Node, State) ->
     erloom_electorate:handle_motion(Message, Node, State);
-auto_effects(Message = #{type := ballot}, Node, State) ->
+handle_builtin(Message = #{type := ballot}, Node, State) ->
     erloom_electorate:handle_ballot(Message, Node, State);
-auto_effects(Message = #{type := move}, Node, State) when Node =:= node() ->
+handle_builtin(Message = #{type := move}, Node, State) when Node =:= node() ->
     %% its convenient to be able to push a node to make a motion
     erloom_electorate:motion(Message, State);
-auto_effects(Message = #{type := task}, Node, State) when Node =:= node() ->
+handle_builtin(Message = #{type := task}, Node, State) when Node =:= node() ->
     %% task messages are for the surety to either retry or complete a task
     %% tasks run per node, transferring control is outside the scope
     erloom_surety:handle_task(Message, State);
-auto_effects(#{type := bar, key := Key}, _Node, State) ->
+handle_builtin(#{type := bar, key := Key}, _Node, State) ->
     cancel_emit(Key, State);
-auto_effects(_Message, _Node, State) ->
+handle_builtin(_Message, _Node, State) ->
     State.
 
-pure_effects(Message, Node, State = #{spec := Spec}) ->
-    %% these effects will be applied to the state on every node
-    %% they should be externally idempotent, as they happen 'at least once'
-    %% auto_effects are builtins that happen automatically for all looms
-    State1 = auto_effects(Message, Node, State),
-    callback(Spec, {pure_effects, 3}, [Message, Node, State1], State1).
-
-side_effects(Message, Reply, State0 = #{spec := Spec}, State1) ->
-    %% these effects will only be applied when a new message is received
-    %% it is possible they won't happen at all, they are 'at most once'
-    %% the default is to acknowledge that we received a message with 'ok'
-    Ok = fun () -> Reply(ok), State1 end,
-    callback(Spec, {side_effects, 4}, [Message, Reply, State0, State1], Ok).
+handle_message(Message, Node, State = #{spec := Spec}) ->
+    %% called to transform state for every message on every node
+    %% happens 'at least once', should be externally idempotent
+    %% for 'at most once', do only if is_incoming(Message, State)
+    State1 = handle_builtin(Message, Node, State),
+    Ok = fun () -> maybe_reply(ok, State1) end,
+    callback(Spec, {handle_message, 3}, [Message, Node, State1], Ok).
 
 vote_on_motion(Motion, Mover, State = #{spec := Spec}) ->
     callback(Spec, {vote_on_motion, 3}, [Motion, Mover, State], {yea, ok}).
@@ -430,8 +470,12 @@ put_barrier(Key, Deps, State) ->
     charge_emit(Key, #{type => bar, deps => Deps, key => Key}, State).
 
 charge_emit(Key, Message, State) ->
-    charge_emit(Key, Message, fun (_) -> ok end, State).
+    charge_emit(Key, Message, undefined, State).
 
+charge_emit(Key, Message, carry, State = #{incoming := {_, Reply}}) ->
+    charge_emit(Key, Message, Reply, State);
+charge_emit(Key, Message, carry, State) ->
+    charge_emit(Key, Message, undefined, State);
 charge_emit(Key, Message, Reply, State = #{emits := Emits}) ->
     State#{emits => util:set(Emits, Key, {Message, Reply})}.
 

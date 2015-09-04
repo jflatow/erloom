@@ -4,8 +4,7 @@
 -export([home/1,
          opts/1,
          write_through/3,
-         pure_effects/3,
-         side_effects/4,
+         handle_message/3,
          vote_on_motion/3,
          motion_decided/4,
          handle_idle/1]).
@@ -28,41 +27,47 @@ write_through(#{write := W}, _N, _State) when is_integer(W) ->
 write_through(_Message, _N, _State) ->
     {1, infinity}.
 
-pure_effects(#{do := save}, _Node, State) ->
-    loom:save(State);
-pure_effects(#{type := start}, Node, State) ->
+handle_message(#{do := save}, _Node, State) ->
+    loom:maybe_reply(ok, loom:save(State));
+handle_message(#{do := get_state}, _Node, State) ->
+    loom:maybe_reply(State, State);
+handle_message(#{do := emit} = Message, _Node, State) ->
+    case loom:is_incoming(Message, State) of
+        true ->
+            loom:charge_emit(key, #{do => reply}, carry, State);
+        false ->
+            loom:maybe_reply(never_reply, State)
+    end;
+handle_message(#{do := reply}, _Node, State) ->
+    loom:maybe_reply(got_it, State);
+handle_message(#{type := start}, Node, State) ->
     io:format("~p started~n", [Node]),
-    State;
-pure_effects(#{type := stop}, Node, State) ->
+    loom:maybe_reply(ok, State);
+handle_message(#{type := stop}, Node, State) ->
     io:format("~p stopped~n", [Node]),
-    State;
-pure_effects(#{type := task, key := Key, done := _}, Node, State) ->
+    loom:maybe_reply(ok, State);
+handle_message(#{type := move}, Node, State) ->
+    io:format("~p moved, deferring reply~n", [Node]),
+    loom:defer_reply(State);
+handle_message(#{type := task, key := Key, done := _}, Node, State) ->
     io:format("~p completed task ~p~n", [Node, Key]),
-    State;
-pure_effects(#{type := bar}, Node, State) ->
+    loom:maybe_reply(ok, State);
+handle_message(#{type := bar}, Node, State) ->
     io:format("~p put a sync barrier~n", [Node]),
-    State;
-pure_effects(Message, Node, State) ->
-    io:format("pure effects: ~p ~p~n", [maps:without([deps], Message), Node]),
-    State.
-
-side_effects(#{do := get_state}, Reply, _State, State) ->
-    Reply(State),
-    State;
-side_effects(#{write := _}, Reply, _State, State = #{wrote := Wrote}) ->
-    Reply(Wrote),
-    State;
-side_effects(_Message, Reply, _State, State) ->
-    Reply(ok),
-    State.
+    loom:maybe_reply(ok, State);
+handle_message(#{write := _}, _Node, State = #{wrote := Wrote}) ->
+    loom:maybe_reply(Wrote, State);
+handle_message(Message, Node, State) ->
+    io:format("~p message: ~p~n", [Node, Message]),
+    loom:maybe_reply(ok, State).
 
 vote_on_motion(#{key := Key}, Mover, _State) ->
-    io:format("vote on ~p from ~p~n", [Key, Mover]),
+    io:format("~p vote on ~p from ~p ~n", [node(), Key, Mover]),
     {yea, ok}.
 
 motion_decided(#{key := Key}, Mover, Decision, State) ->
-    io:format("decided ~p for ~p from ~p~n", [Decision, Key, Mover]),
-    State.
+    io:format("~p decided ~p for ~p from ~p~n", [node(), Decision, Key, Mover]),
+    loom:maybe_reply(Key, Decision, State).
 
 handle_idle(State) ->
     io:format("idling~n"),

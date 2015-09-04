@@ -122,6 +122,17 @@ get_mover(MotionId) ->
     %% somewhat fragile, but the id currently contains the node that made the motion
     hd(maps:keys(MotionId)).
 
+delete_motion(MotionId, #{deps := ParentId}, State = #{elect := Elect}) ->
+    %% remove the motion from the parent, and delete the motion
+    Elect1 =
+        case util:get(Elect, ParentId) of
+            undefined ->
+                Elect;
+            {Kids, Parent, Votes} ->
+                util:set(Elect, ParentId, {lists:delete(MotionId, Kids), Parent, Votes})
+        end,
+    util:set(State, elect, util:remove(Elect1, MotionId)).
+
 vote(MotionId, Vote, State) ->
     Ballot = #{type => ballot, deps => MotionId, vote => Vote},
     loom:charge_emit({ballot, MotionId}, Ballot, State).
@@ -312,7 +323,7 @@ reflect_decision(MotionId, {Kids, Motion, _}, Decision = {true, _}, State = #{el
                 loom:put_barrier({conf, MotionId}, S3);
             _ ->
                 %% the motion was not a conf change, no need to keep it around
-                util:remove(State, [elect, MotionId])
+                delete_motion(MotionId, Motion, State)
         end,
     State2 = loom:motion_decided(Motion, Mover, Decision, State1),
     lists:foldl(fun (Kid, S = #{elect := E}) ->
@@ -331,7 +342,7 @@ reflect_decision(MotionId, {Kids, Motion, _}, Decision, State = #{elect := Elect
                 %% not the current conf and we didn't believe it was
                 State
         end,
-    State2 = util:remove(State1, [elect, MotionId]),
+    State2 = delete_motion(MotionId, Motion, State1),
     State3 = loom:motion_decided(Motion, Mover, Decision, State2),
     lists:foldl(fun (Kid, S = #{elect := E}) ->
                         reflect_decision(Kid, util:get(E, Kid), {false, premise}, S)

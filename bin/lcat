@@ -12,7 +12,7 @@ main(Homes) ->
 
 lcat(Home) ->
     erloom_logs:fold(
-      fun (Message, Node, _) ->
+      fun (Message, {{Node, IId}, {_, After}},  _) ->
               Vals =
                   maps:fold(fun (K, V, A) ->
                                     [io_lib:format("~s=~1024p", [K, V])|A]
@@ -20,5 +20,5 @@ lcat(Home) ->
               Type = util:get(Message, type, "-"),
               Deps = util:get(Message, deps, #{}),
               Line = util:join(Vals, "\t"),
-              io:format("~s\t~s\t~B\t~s~n", [Node, Type, map_size(Deps), Line])
+              io:format("~s ~s ~p\t~s\t~B\t~s~n", [Node, IId, After, Type, map_size(Deps), Line])
       end, nil, Home).

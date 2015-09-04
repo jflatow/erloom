@@ -126,8 +126,8 @@ fold(Fun, Acc, State) ->
 
 fold(Fun, Acc, {Start, Stop}, State = #{logs := _, front := Front}) ->
     State1 = State#{acc => Acc, point => util:def(Start, #{})},
-    State2 = replay(fun (Message, Node, S = #{acc := A}) ->
-                            S#{acc => Fun(Message, Node, A)}
+    State2 = replay(fun (Message, _Node, S = #{acc := A, locus := L}) ->
+                            S#{acc => Fun(Message, L, A)}
                     end, [util:def(Stop, Front)], State1),
     util:get(State2, acc);
 fold(Fun, Acc, Range, Home) ->
@@ -153,25 +153,25 @@ replay(Fun, [Target|Stack], State = #{point := Point, front := Front}) ->
                         replay(Fun, [Deps, Target], S)
                 end
         end,
-    State1 =
-        case erloom:edge_delta(Target, Point) of
-            TP when map_size(TP) > 0 ->
-                %% target is ahead of point: try to reach it
-                case erloom:edge_delta(Target, Front) of
-                    TF when map_size(TF) > 0 ->
-                        %% target is unreachable: stop
-                        throw({unreachable, Target, State});
-                    _ ->
-                        %% target is contained in front
-                        maps:fold(fun (Node, Range, S) ->
-                                          replay(Replay, Range, Node, S)
-                                  end, State, TP)
-                end;
-            _ ->
-                %% target is reached
-                State
-        end,
-    replay(Fun, Stack, State1);
+    case erloom:edge_delta(Target, Point) of
+        TP when map_size(TP) > 0 ->
+            %% target is ahead of point: try to reach it
+            case erloom:edge_delta(Target, Front) of
+                TF when map_size(TF) > 0 ->
+                    %% target is unreachable: stop
+                    throw({unreachable, Target, State});
+                _ ->
+                    %% target is contained in front
+                    %% go after a node that's ahead, then try the whole thing again
+                    %% since we may have covered more ground than we intended
+                    [{Node, Range}|_] = maps:to_list(TP),
+                    State1 = replay(Replay, Range, Node, State),
+                    replay(Fun, [Target|Stack], State1)
+            end;
+        _ ->
+            %% target is reached
+            replay(Fun, Stack, State)
+    end;
 replay(_, [], State) ->
     State.
 
@@ -183,7 +183,10 @@ replay(Fun, {{AId, A}, {AId, B}}, Node, State) ->
     {Log, State1} = obtain({Node, AId}, State),
     {{_, After}, State2 = #{point := Point}} =
         log:bendl(Log,
-                  fun ({{Before, _} = Range, Data}, S = #{point := P}) ->
+                  fun ({{Before, _}, _}, S = #{point := #{Node := Mark}}) when {AId, Before} < Mark ->
+                          %% point already got ahead of us, just skip
+                          S;
+                      ({{Before, _} = Range, Data}, S = #{point := P}) ->
                           %% NB: we mark Before in case Fun decides to exit early
                           P1 = P#{Node => {AId, Before}},
                           S1 = S#{point => P1, locus => {{Node, AId}, Range}},
