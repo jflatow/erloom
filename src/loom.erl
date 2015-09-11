@@ -82,7 +82,7 @@
     {term(), term(), state()}.
 -callback write_through(message(), pos_integer(), state()) ->
     {non_neg_integer(), non_neg_integer()}.
--callback handle_message(message(), node(), state()) -> state().
+-callback handle_message(message(), node(), boolean(), state()) -> state().
 -callback vote_on_motion(motion(), node(), state()) -> {vote(), state()}.
 -callback motion_decided(motion(), node(), decision(), state()) -> state().
 -callback handle_info(term(), state()) -> state().
@@ -95,7 +95,7 @@
                      waken/1,
                      verify_message/2,
                      write_through/3,
-                     handle_message/3,
+                     handle_message/4,
                      vote_on_motion/3,
                      motion_decided/4,
                      handle_info/2,
@@ -124,7 +124,6 @@
          waken/1,
          start/2,
          stop/2,
-         is_incoming/2,
          after_locus/1,
          defer_reply/1,
          defer_reply/2,
@@ -133,7 +132,7 @@
          unmet_deps/2,
          verify_message/2,
          write_through/3,
-         handle_message/3,
+         handle_message/4,
          vote_on_motion/3,
          motion_decided/4,
          handle_info/2,
@@ -145,8 +144,7 @@
 
 -export([change_peers/2]).
 
--export([emit_after_locus/2,
-         emit_after_point/2,
+-export([emit_after/2,
          emit_message/2,
          emit_message/3,
          create_task/3,
@@ -309,11 +307,6 @@ stop(Node, State) when Node =:= node() ->
 stop(_, State) ->
     State.
 
-is_incoming(Message, #{incoming := {Message, _}}) ->
-    true;
-is_incoming(_, _) ->
-    false.
-
 defer_reply(State) ->
     defer_reply(after_locus(State), State).
 
@@ -415,14 +408,14 @@ handle_builtin(Message = #{type := task}, Node, State) when Node =:= node() ->
 handle_builtin(_Message, _Node, State) ->
     State.
 
-handle_message(Message, Node, State = #{spec := Spec}) ->
+handle_message(Message, Node, IsNew, State = #{spec := Spec}) ->
     %% called to transform state for every message on every node
     %% happens 'at least once', should be externally idempotent
-    %% for 'at most once', do only if is_incoming(Message, State)
+    %% for 'at most once', check if is new
     State1 = cancel_emit(Message, State),
     State2 = handle_builtin(Message, Node, State1),
     Ok = fun () -> maybe_reply(ok, State2) end,
-    callback(Spec, {handle_message, 3}, [Message, Node, State2], Ok).
+    callback(Spec, {handle_message, 4}, [Message, Node, IsNew, State2], Ok).
 
 vote_on_motion(Motion, Mover, State = #{spec := Spec}) ->
     callback(Spec, {vote_on_motion, 3}, [Motion, Mover, State], {{yea, ok}, State}).
@@ -468,14 +461,10 @@ change_peers({remove, [Node|Rest]}, State) ->
 change_peers({_, []}, State) ->
     State.
 
-emit_after_locus(Message, State) ->
-    %% emit a message that depends on the current message
-    emit_message(Message#{deps => after_locus(State)}, State).
-
-emit_after_point(Message, State = #{point := Point}) ->
+emit_after(Message, State = #{point := Point}) ->
     %% emit a message that depends on the current context
-    %% often the point is as good of a sync point as any
-    emit_message(Message#{deps => Point}, State).
+    %% often the point is as good of a sync point as any, but should be after locus too
+    emit_message(Message#{deps => erloom:edge_hull(Point, after_locus(State))}, State).
 
 emit_message(Message, State) ->
     emit_message(Message, undefined, State).
