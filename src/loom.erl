@@ -22,7 +22,9 @@
            }.
 -type message() :: #{
                deps => erloom:edge(),
-               type => start | stop | motion | ballot | move | task | bar | term()
+               name => term(),
+               type => start | stop | motion | ballot | move | task | term(),
+               kind => term()
               }.
 -type reply() :: fun((term()) -> term()).
 -type state() :: #{
@@ -54,13 +56,16 @@
 -type decision() :: {boolean(), term()}.
 -type motion() :: #{
               deps => erloom:edge(),
+              name => term(),
               type => motion,
+              kind => conf | chain | term(),
               conf => {add | remove | set, [node()]},
               vote => vote(),
               fiat => decision()
 }.
 -type ballot() :: #{
               deps => erloom:edge(),
+              name => term(),
               type => ballot,
               vote => vote(),
               fiat => decision()
@@ -78,7 +83,7 @@
 -callback write_through(message(), pos_integer(), state()) ->
     {non_neg_integer(), non_neg_integer()}.
 -callback handle_message(message(), node(), state()) -> state().
--callback vote_on_motion(motion(), node(), state()) -> vote().
+-callback vote_on_motion(motion(), node(), state()) -> {vote(), state()}.
 -callback motion_decided(motion(), node(), decision(), state()) -> state().
 -callback handle_info(term(), state()) -> state().
 -callback handle_idle(state()) -> state().
@@ -120,6 +125,7 @@
          start/2,
          stop/2,
          is_incoming/2,
+         after_locus/1,
          defer_reply/1,
          defer_reply/2,
          maybe_reply/2,
@@ -139,13 +145,13 @@
 
 -export([change_peers/2]).
 
--export([put_barrier/2,
-         put_barrier/3,
-         charge_emit/3,
-         charge_emit/4,
-         cancel_emit/2,
+-export([emit_after_locus/2,
+         emit_after_point/2,
+         emit_message/2,
+         emit_message/3,
          create_task/3,
-         make_motion/2]).
+         make_motion/2,
+         chain_value/3]).
 
 %% 'send' is the main entry point for communicating with the loom
 %% returns the (local) pid for the loom which can be cached
@@ -308,14 +314,14 @@ is_incoming(Message, #{incoming := {Message, _}}) ->
 is_incoming(_, _) ->
     false.
 
-defer_reply(State = #{locus := Locus}) ->
-    defer_reply(erloom:locus_after(Locus), State).
+defer_reply(State) ->
+    defer_reply(after_locus(State), State).
 
-defer_reply(Key, State = #{deferred := Deferred, incoming := {_, Reply}}) ->
+defer_reply(Name, State = #{deferred := Deferred, incoming := {_, Reply}}) ->
     %% defer the incoming reply, if any
-    %% now someone can reply later using the key
+    %% now someone can reply later using the name
     %% deferred replies are transient, they aren't saved in the state
-    State#{deferred => util:set(Deferred, Key, Reply)};
+    State#{deferred => util:set(Deferred, Name, Reply)};
 defer_reply(_, State) ->
     State.
 
@@ -327,22 +333,25 @@ maybe_reply(_, State) ->
 
 maybe_reply(undefined, _, State) ->
     State;
-maybe_reply(#{type := motion, key := Key}, Response, State) ->
-    %% replying to a motion means replying to the motion key
-    maybe_reply(Key, Response, State);
+maybe_reply(#{type := motion, name := Name}, Response, State) ->
+    %% replying to a motion means replying to the motion name
+    maybe_reply(Name, Response, State);
 maybe_reply(Reply, Response, State) when is_function(Reply) ->
     Reply(Response),
     State;
-maybe_reply(Key, Response, State = #{deferred := Deferred}) ->
-    %% try and reply to the deferred reply under the key
+maybe_reply(Name, Response, State = #{deferred := Deferred}) ->
+    %% try and reply to the deferred reply by name
     %% once the reply is used it gets deleted
     %% we could also keep a counter if we need to call more than once
-    case util:get(Deferred, Key) of
+    case util:get(Deferred, Name) of
         undefined ->
             State;
         Reply ->
-            maybe_reply(Reply, Response, util:remove(State, [deferred, Key]))
+            maybe_reply(Reply, Response, util:remove(State, [deferred, Name]))
     end.
+
+after_locus(#{locus := Locus}) ->
+    erloom:locus_after(Locus).
 
 unmet_deps(#{deps := Deps}, #{point := Point}) ->
     case erloom:edge_delta(Deps, Point) of
@@ -403,8 +412,6 @@ handle_builtin(Message = #{type := task}, Node, State) when Node =:= node() ->
     %% task messages are for the surety to either retry or complete a task
     %% tasks run per node, transferring control is outside the scope
     erloom_surety:handle_task(Message, State);
-handle_builtin(#{type := bar, key := Key}, _Node, State) ->
-    cancel_emit(Key, State);
 handle_builtin(_Message, _Node, State) ->
     State.
 
@@ -412,12 +419,13 @@ handle_message(Message, Node, State = #{spec := Spec}) ->
     %% called to transform state for every message on every node
     %% happens 'at least once', should be externally idempotent
     %% for 'at most once', do only if is_incoming(Message, State)
-    State1 = handle_builtin(Message, Node, State),
-    Ok = fun () -> maybe_reply(ok, State1) end,
-    callback(Spec, {handle_message, 3}, [Message, Node, State1], Ok).
+    State1 = cancel_emit(Message, State),
+    State2 = handle_builtin(Message, Node, State1),
+    Ok = fun () -> maybe_reply(ok, State2) end,
+    callback(Spec, {handle_message, 3}, [Message, Node, State2], Ok).
 
 vote_on_motion(Motion, Mover, State = #{spec := Spec}) ->
-    callback(Spec, {vote_on_motion, 3}, [Motion, Mover, State], {yea, ok}).
+    callback(Spec, {vote_on_motion, 3}, [Motion, Mover, State], {{yea, ok}, State}).
 
 motion_decided(Motion, Mover, Decision, State = #{spec := Spec}) ->
     callback(Spec, {motion_decided, 4}, [Motion, Mover, Decision, State], State).
@@ -460,32 +468,55 @@ change_peers({remove, [Node|Rest]}, State) ->
 change_peers({_, []}, State) ->
     State.
 
-put_barrier(Key, State = #{point := Point}) ->
-    %% often the current point is as good of a sync point as any
-    put_barrier(Key, Point, State).
+emit_after_locus(Message, State) ->
+    %% emit a message that depends on the current message
+    emit_message(Message#{deps => after_locus(State)}, State).
 
-put_barrier(Key, Deps, State) ->
-    %% a simple barrier message, generally has some deps on a sync point
-    %% also has a key to prevent from emitting again
-    charge_emit(Key, #{type => bar, deps => Deps, key => Key}, State).
+emit_after_point(Message, State = #{point := Point}) ->
+    %% emit a message that depends on the current context
+    %% often the point is as good of a sync point as any
+    emit_message(Message#{deps => Point}, State).
 
-charge_emit(Key, Message, State) ->
-    charge_emit(Key, Message, undefined, State).
+emit_message(Message, State) ->
+    emit_message(Message, undefined, State).
 
-charge_emit(Key, Message, carry, State = #{incoming := {_, Reply}}) ->
-    charge_emit(Key, Message, Reply, State);
-charge_emit(Key, Message, carry, State) ->
-    charge_emit(Key, Message, undefined, State);
-charge_emit(Key, Message, Reply, State = #{emits := Emits}) ->
-    State#{emits => util:set(Emits, Key, {Message, Reply})}.
+emit_message(Message, carry, State = #{incoming := {_, Reply}}) ->
+    emit_message(Message, Reply, State);
+emit_message(Message, carry, State) ->
+    emit_message(Message, undefined, State);
+emit_message(Message = #{name := Name}, Reply, State = #{emits := Emits}) ->
+    State#{emits => util:set(Emits, Name, {Message, Reply})};
+emit_message(Message, Reply, State) ->
+    %% by default assume we saw a message that made us want to emit
+    %% use the after edge of the message we saw as a name for the new message
+    %% the name prevents the message from being emitted again (e.g. during replay)
+    %% NB: don't rely on the default name if emitting multiple messages at a time
+    emit_message(Message#{name => after_locus(State)}, Reply, State).
 
-cancel_emit(Key, State = #{emits := Emits}) ->
-    State#{emits => util:delete(Emits, Key)}.
+cancel_emit(#{name := _, type := task}, State) ->
+    State;
+cancel_emit(#{name := Name}, State = #{emits := Emits}) ->
+    State#{emits => util:delete(Emits, Name)};
+cancel_emit(_, State) ->
+    State.
 
-create_task(Key, Task, State) ->
+create_task(Name, Task, State) ->
     %% tasks have similar "defer until tip" semantics as emit messages
     %% however processes must be restored on wake, making them more complicated
-    erloom_surety:task(Key, Task, State).
+    erloom_surety:task(Name, Task, State).
 
 make_motion(Motion, State) ->
     erloom_electorate:motion(Motion, State).
+
+chain_value(Path, Value, State) ->
+    case util:lookup(State, Path, {undefined, undefined}) of
+        {_, Prior} ->
+            make_motion(#{
+                           kind => chain,
+                           path => Path,
+                           prior => Prior,
+                           value => Value
+                         }, State);
+        {_, _, locked} ->
+            {retry, locked}
+    end.

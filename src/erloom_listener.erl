@@ -174,8 +174,12 @@ check_recovery(State = #{status := recovering, peers := Peers, front := Front, e
                           end, true, Peers),
             case Recovered of
                 true ->
-                    Message = #{deps => #{node() => OurMark}, type => recover},
-                    loom:charge_emit(recovered, Message, loom:waken(State));
+                    Message = #{
+                      deps => #{node() => OurMark},
+                      name => recover,
+                      type => recover
+                     },
+                    loom:emit_message(Message, loom:waken(State));
                 false ->
                     State
             end

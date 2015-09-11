@@ -8,9 +8,9 @@
 
 create(_, State = #{elect := _}) ->
     State; %% electorate already exists
-create(Electors, State = #{locus := Locus}) ->
-    Edge = erloom:locus_after(Locus),
-    Info = {[], #{conf => {set, Electors}}, {ratified, undefined}},
+create(Electors, State) ->
+    Edge = loom:after_locus(State),
+    Info = {[], #{kind => conf, conf => {set, Electors}}, {ratified, undefined}},
     State1 = State#{elect => #{
                       root => Edge,
                       known => Edge,
@@ -19,7 +19,7 @@ create(Electors, State = #{locus := Locus}) ->
                      }},
     update_conf_peers(Edge, Info, State1).
 
-motion(Motion = #{key := Key, fiat := _}, State) ->
+motion(Motion = #{fiat := _}, State) ->
     %% fiat is forced, must depend on a known conf, or it might not take effect
     %% NB:
     %%  fiats are inherently unsafe, things that were previously true may become untrue
@@ -29,27 +29,22 @@ motion(Motion = #{key := Key, fiat := _}, State) ->
                 type => motion,
                 deps => util:lookup(State, [elect, known])
                },
-    loom:charge_emit({motion, Key}, Motion1, State);
-motion(Motion = #{key := Key}, State) ->
+    loom:emit_message(Motion1, State);
+motion(Motion, State) ->
     %% not a fiat, voting predicated on currently believed conf
     Motion1 = Motion#{
                 type => motion,
                 deps => util:lookup(State, [elect, current])
                },
-    Motion2 =
+    {Motion2, State1} =
         case util:get(Motion1, vote) of
             undefined ->
-                Motion1#{vote => loom:vote_on_motion(Motion1, node(), State)};
+                {Vote, S} = vote_on_motion(Motion1, node(), State),
+                {Motion1#{vote => Vote}, S};
             _ ->
-                Motion1
+                {Motion1, State}
         end,
-    loom:charge_emit({motion, Key}, Motion2, State);
-motion(Motion, State = #{locus := Locus}) ->
-    %% by default assume we saw a message that made us want to make a motion
-    %% use the after edge of the message we saw as a key for the motion
-    %% the key is used to charge to emit (and to cancel e.g. during replay)
-    %% NB: don't rely on this key if making multiple motions (but why would you do that?)
-    motion(Motion#{key => erloom:locus_after(Locus)}, State).
+    loom:emit_message(Motion2, State1).
 
 is_descendant(Id, Id, _Elect) ->
     true;
@@ -111,9 +106,9 @@ get_electorate(Motion, State) ->
                         Electors
                 end, [], get_ancestors(Motion, State)).
 
-get_motion_id(#{type := motion}, #{locus := Locus}) ->
+get_motion_id(#{type := motion}, State) ->
     %% we are processing the motion, the id is the after edge
-    erloom:locus_after(Locus);
+    loom:after_locus(State);
 get_motion_id(#{type := ballot, deps := MotionId}, _State) ->
     %% we are processing the ballot, the id is the deps edge
     MotionId.
@@ -134,8 +129,12 @@ delete_motion(MotionId, #{deps := ParentId}, State = #{elect := Elect}) ->
     util:set(State, elect, util:remove(Elect1, MotionId)).
 
 vote(MotionId, Vote, State) ->
-    Ballot = #{type => ballot, deps => MotionId, vote => Vote},
-    loom:charge_emit({ballot, MotionId}, Ballot, State).
+    Ballot = #{
+      deps => MotionId,
+      type => ballot,
+      vote => Vote
+     },
+    loom:emit_message(Ballot, State).
 
 affirm_config(#{type := Type, deps := ConfId}, Node, State) ->
     %% when a conf changes the peer group, we keep a list of nodes that need start / stop
@@ -155,12 +154,11 @@ affirm_config(#{type := Type, deps := ConfId}, Node, State) ->
             State
     end.
 
-handle_motion(Motion = #{key := Key}, Node, State) when Node =:= node() ->
+handle_motion(Motion, Node, State) when Node =:= node() ->
     %% its our motion, no need to emit if we were going to
     MotionId = get_motion_id(Motion, State),
     State1 = maybe_save_motion(Motion, MotionId, State),
-    State2 = loom:cancel_emit({motion, Key}, State1),
-    handle_ballot(Motion, Node, State2);
+    handle_ballot(Motion, Node, State1);
 handle_motion(Motion = #{deps := ConfId}, Node, State) ->
     %% not our motion, we should maybe try to vote on it
     MotionId = get_motion_id(Motion, State),
@@ -169,7 +167,7 @@ handle_motion(Motion = #{deps := ConfId}, Node, State) ->
     case util:lookup(State1, [elect, MotionId]) of
         undefined ->
             %% the motion must have been predicated on an impossible electorate
-            loom:motion_decided(Motion, Mover, {false, premise}, State1);
+            motion_decided(MotionId, Motion, Mover, {false, premise}, State1);
         _ ->
             %% we successfully saved the motion, the premise is a possibility
             State2 =
@@ -183,8 +181,8 @@ handle_motion(Motion = #{deps := ConfId}, Node, State) ->
                                     ConfId ->
                                         %% the motion has the 'right' electorate
                                         Mover = get_mover(MotionId),
-                                        Vote = loom:vote_on_motion(Motion, Mover, State1),
-                                        vote(MotionId, Vote, State1);
+                                        {Vote, S} = vote_on_motion(Motion, Mover, State1),
+                                        vote(MotionId, Vote, S);
                                     _ ->
                                         %% we don't agree about the electorate
                                         vote(MotionId, {nay, electorate}, State1)
@@ -206,8 +204,7 @@ handle_ballot(Ballot, Node, State) when Node =:= node() ->
     MotionId = get_motion_id(Ballot, State),
     State1 = maybe_save_ballot(Ballot, MotionId, Node, State),
     State2 = maybe_change_conf(Ballot, MotionId, State1),
-    State3 = loom:cancel_emit({ballot, MotionId}, State2),
-    adjudicate(Ballot, MotionId, State3);
+    adjudicate(Ballot, MotionId, State2);
 handle_ballot(Ballot, Node, State) ->
     %% its not our ballot, we'll count it in a sec (maybe)
     MotionId = get_motion_id(Ballot, State),
@@ -245,7 +242,7 @@ maybe_save_ballot(#{fiat := _}, _, _, State) ->
 
 maybe_change_conf(#{vote := {yea, _}}, MotionId, State = #{elect := Elect}) ->
     case util:get(Elect, MotionId) of
-        {_, #{conf := _}, _} ->
+        {_, #{kind := conf}, _} ->
             %% the motion is a conf change, and we accepted it, so update current
             State#{elect => Elect#{current => MotionId}};
         _ ->
@@ -300,12 +297,12 @@ reflect_decision(MotionId, {Kids, Motion, _}, Decision = {true, _}, State = #{el
     Mover = get_mover(MotionId),
     State1 =
         case Motion of
-            #{conf := _} ->
+            #{kind := conf} ->
                 %% the motion was a conf change, update the last known conf and ratify it
                 %% if the current belief is not a descendant of known, change it
                 %% any conf siblings must be killed, there can only be one
                 %% the peer group should be updated to support the electorate
-                %% also, we must charge emit a message with deps on the ratifying votes (if any)
+                %% also, we must emit a message with deps on the ratifying votes (if any)
                 %% this keeps the guarantee that subsets of our log determine the peer group for writing
                 %% our Point is at least past the ratifying votes, so that will do
                 MotionInfo = {Kids, Motion, {ratified, undefined}},
@@ -320,12 +317,12 @@ reflect_decision(MotionId, {Kids, Motion, _}, Decision = {true, _}, State = #{el
                 S1 = State#{elect => Elect2},
                 S2 = murder_conf_siblings(MotionId, S1),
                 S3 = update_conf_peers(MotionId, MotionInfo, S2),
-                loom:put_barrier({conf, MotionId}, S3);
+                loom:emit_after_point(#{name => {conf, MotionId}}, S3);
             _ ->
                 %% the motion was not a conf change, no need to keep it around
                 delete_motion(MotionId, Motion, State)
         end,
-    State2 = loom:motion_decided(Motion, Mover, Decision, State1),
+    State2 = motion_decided(MotionId, Motion, Mover, Decision, State1),
     lists:foldl(fun (Kid, S = #{elect := E}) ->
                         reckon_elections(Kid, util:get(E, Kid), S)
                 end, State2, Kids);
@@ -343,10 +340,50 @@ reflect_decision(MotionId, {Kids, Motion, _}, Decision, State = #{elect := Elect
                 State
         end,
     State2 = delete_motion(MotionId, Motion, State1),
-    State3 = loom:motion_decided(Motion, Mover, Decision, State2),
+    State3 = motion_decided(MotionId, Motion, Mover, Decision, State2),
     lists:foldl(fun (Kid, S = #{elect := E}) ->
                         reflect_decision(Kid, util:get(E, Kid), {false, premise}, S)
                 end, State3, Kids).
+
+vote_on_motion(#{kind := conf}, _, State) ->
+    {{yea, ok}, State};
+vote_on_motion(#{kind := chain, path := Path, prior := Prior}, _, State) ->
+    case util:lookup(State, Path, {undefined, undefined}) of
+        {_, _, locked} ->
+            %% the path is locked, cannot accept
+            {{nay, locked}, State};
+        {Value, Prior} ->
+            %% the prior matches, accept and lock
+            State1 = util:modify(State, Path, {Value, Prior, locked}),
+            {{yea, ok}, State1};
+        {_, _} ->
+            %% the prior doesn't match, cannot accept
+            {{nay, version}, State}
+    end;
+vote_on_motion(Motion, Mover, State) ->
+    loom:vote_on_motion(Motion, Mover, State).
+
+motion_decided(MotionId, #{kind := chain, path := Path} = Motion, Mover, Decision, State) ->
+    %% NB: motion id must be passed in, do the callbacks need it too? get_motion_id wont work here
+    %%     in general from motion_decided we should use the motion id to emit, etc.
+    State1 =
+        case Decision of
+            {true, _} ->
+                %% passed a motion to chain: store value and bump version
+                Value = util:get(Motion, value),
+                Version = MotionId,
+                util:modify(State, Path, {Value, Version});
+            _ ->
+                %% failed to chain: unlock
+                util:modify(State, Path, fun ({Value, Version}) ->
+                                                 {Value, Version};
+                                             ({Value, Version, locked}) ->
+                                                 {Value, Version}
+                                         end)
+        end,
+    loom:motion_decided(Motion, Mover, Decision, State1);
+motion_decided(_MotionId, Motion, Mover, Decision, State) ->
+    loom:motion_decided(Motion, Mover, Decision, State).
 
 tally_votes(_MotionId, {_, Motion, Votes}, State) ->
     case lists:foldl(fun (Member, {N, P, F}) ->
@@ -359,16 +396,16 @@ tally_votes(_MotionId, {_, Motion, Votes}, State) ->
                                      {N + 1, P, F + 1}
                              end
                      end, {0, 0, 0}, get_electorate(Motion, State)) of
-        {N, P, _} when P > N div 2 ->
+        {N, P, _} when P > N / 2 ->
             {true, majority};
-        {N, _, F} when F >= N div 2 ->
+        {N, _, F} when F >= N / 2 ->
             {false, majority};
         _ ->
             undefined
     end.
 
 murder_conf_siblings(ConfId, State) ->
-    lists:foldl(fun ({Id, Info = {_, #{conf := _}, _}}, S) ->
+    lists:foldl(fun ({Id, Info = {_, #{kind := conf}, _}}, S) ->
                         reflect_decision(Id, Info, {false, romulus}, S);
                     (_, S) ->
                         S
