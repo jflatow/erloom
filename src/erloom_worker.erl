@@ -14,10 +14,12 @@ wait() ->
         {{new_message, Message, Reply}, State} ->
             %% writing to peers before updating is not arbitrary
             %% log prefix tells who could have been written to next
-            State1 = write_through(Message, util:set(State, incoming, {Message, Reply})),
-            State2 = loom:handle_message(Message, node(), true, State1),
-            State3 = point_to_front(node(), util:delete(State2, incoming)),
-            done(State3);
+            State1 = store_default(Message, Reply, State),
+            State2 = write_through(Message, State1),
+            State3 = loom:handle_message(Message, node(), true, State2),
+            State4 = point_to_front(node(), State3),
+            State5 = clear_default(State4),
+            done(State5);
         {replay_logs, State} ->
             State1 = replay_logs(State),
             done(State1);
@@ -47,6 +49,14 @@ done(State = #{listener := Listener, status := Status}) ->
         end,
     Listener ! {worker_done, State1},
     wait().
+
+store_default(#{yarn := Yarn}, undefined, State = #{reply := Replies}) ->
+    State#{reply => Replies#{default => Yarn}};
+store_default(_Message, Reply, State = #{reply := Replies}) ->
+    State#{reply => Replies#{default => Reply}}.
+
+clear_default(State) ->
+    util:remove(State, [reply, default]).
 
 point_to_front(Node, State) ->
     util:modify(State, [point, Node], util:lookup(State, [front, Node])).

@@ -19,9 +19,9 @@ listen(catchup, State = #{status := awake, prior := _, emits := Emits}) ->
         [] ->
             %% no more emissions: attempt to replay logs from point to front
             replay_logs(State);
-        [{_Key, {Message, Reply}}|Rest] ->
+        [{_Key, Message}|Rest] ->
             %% treat an emission as a new message to self
-            work_on({new_message, Message, Reply}, State#{emits => Rest})
+            work_on({new_message, Message, undefined}, State#{emits => Rest})
     end;
 listen(catchup, State = #{status := waking, point := Front, front := Front}) ->
     %% we're almost awake and we've caught up to front: finish waking up
@@ -176,10 +176,10 @@ check_recovery(State = #{status := recovering, peers := Peers, front := Front, e
                 true ->
                     Message = #{
                       deps => #{node() => OurMark},
-                      name => recover,
-                      type => recover
+                      type => recover,
+                      yarn => recover
                      },
-                    loom:emit_message(Message, loom:waken(State));
+                    loom:create_yarn(Message, loom:waken(State));
                 false ->
                     State
             end

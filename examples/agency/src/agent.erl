@@ -32,20 +32,17 @@ handle_message(#{do := save}, _Node, true, State) ->
 handle_message(#{do := get_state}, _Node, true, State) ->
     loom:maybe_reply(State, State);
 handle_message(#{do := emit}, _Node, true, State) ->
-    loom:emit_message(#{do => reply}, carry, State);
+    loom:create_yarn(#{do => reply}, State);
 handle_message(#{do := reply}, _Node, true, State) ->
     loom:maybe_reply(got_it, State);
 handle_message(#{chain := {Path, Value}}, _Node, true, State) ->
-    loom:defer_reply(loom:chain_value(Path, Value, State));
+    loom:chain_value(Path, Value, State);
 handle_message(#{type := start}, Node, true, State) ->
     io:format("~p started~n", [Node]),
     loom:maybe_reply(ok, State);
 handle_message(#{type := stop}, Node, true, State) ->
     io:format("~p stopped~n", [Node]),
     loom:maybe_reply(ok, State);
-handle_message(#{type := move}, Node, true, State) ->
-    io:format("~p moved, deferring reply~n", [Node]),
-    loom:defer_reply(State);
 handle_message(#{type := task, name := Name, done := _}, Node, true, State) ->
     io:format("~p completed task ~p~n", [Node, Name]),
     loom:maybe_reply(ok, State);
@@ -57,15 +54,15 @@ handle_message(Message, Node, true, State) ->
 handle_message(_, _, false, State) ->
     State.
 
-vote_on_motion(#{name := Name}, Mover, State) ->
-    io:format("~p vote on ~p from ~p ~n", [node(), Name, Mover]),
+vote_on_motion(#{yarn := Yarn}, Mover, State) ->
+    io:format("~p vote on ~p from ~p ~n", [node(), Yarn, Mover]),
     {{yea, ok}, State}.
 
 motion_decided(#{kind := chain, path := xyz} = Motion, Mover, {true, _}, State) when Mover =:= node() ->
-    State1 = loom:emit_after(#{type => op, store => [generated, data]}, State),
+    State1 = loom:suture_yarn(Motion, #{type => op, store => [generated, data]}, State),
     loom:maybe_reply(Motion, [Mover, 'did pass chain'], State1);
-motion_decided(#{name := Name} = Motion, Mover, Decision, State) ->
-    io:format("~p decided ~p for ~p from ~p~n", [node(), Decision, Name, Mover]),
+motion_decided(#{yarn := Yarn} = Motion, Mover, Decision, State) ->
+    io:format("~p decided ~p for ~p from ~p~n", [node(), Decision, Yarn, Mover]),
     loom:maybe_reply(Motion, Decision, State).
 
 handle_idle(State) ->

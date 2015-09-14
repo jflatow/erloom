@@ -22,9 +22,9 @@
            }.
 -type message() :: #{
                deps => erloom:edge(),
-               name => term(),
                type => start | stop | motion | ballot | move | task | term(),
-               kind => term()
+               kind => term(),
+               yarn => term()
               }.
 -type reply() :: fun((term()) -> term()).
 -type state() :: #{
@@ -48,24 +48,19 @@
              elect => #{},
              emits => [{term(), message()}],
              tasks => #{term() => {pid() | undefined, {module(), atom(), list()}}},
-             deferred => #{term() => function()},
-             incoming => {message(), function()} | undefined
+             reply => #{}
             }.
 
 -type vote() :: {yea, term()} | {nay, term()}.
 -type decision() :: {boolean(), term()}.
--type motion() :: #{
-              deps => erloom:edge(),
-              name => term(),
+-type motion() :: #{  %% + message
               type => motion,
               kind => conf | chain | term(),
               conf => {add | remove | set, [node()]},
               vote => vote(),
               fiat => decision()
 }.
--type ballot() :: #{
-              deps => erloom:edge(),
-              name => term(),
+-type ballot() :: #{  %% + message
               type => ballot,
               vote => vote(),
               fiat => decision()
@@ -125,7 +120,6 @@
          start/2,
          stop/2,
          after_locus/1,
-         defer_reply/1,
          defer_reply/2,
          maybe_reply/2,
          maybe_reply/3,
@@ -144,9 +138,10 @@
 
 -export([change_peers/2]).
 
--export([emit_after/2,
-         emit_message/2,
-         emit_message/3,
+-export([create_yarn/2,
+         stitch_yarn/3,
+         suture_yarn/3,
+         cancel_yarn/2,
          create_task/3,
          make_motion/2,
          chain_value/3]).
@@ -268,7 +263,7 @@ load(State = #{home := _}) ->
       emits => [],
       tasks => #{},
       cache => #{},
-      deferred => #{}
+      reply => #{}
      },
     Kept = maps:merge(Defaults, kept(State)),
     State1 = erloom_logs:load(State),
@@ -307,40 +302,33 @@ stop(Node, State) when Node =:= node() ->
 stop(_, State) ->
     State.
 
-defer_reply(State) ->
-    defer_reply(after_locus(State), State).
-
-defer_reply(Name, State = #{deferred := Deferred, incoming := {_, Reply}}) ->
-    %% defer the incoming reply, if any
-    %% now someone can reply later using the name
+defer_reply(Name, State = #{reply := Replies}) ->
+    %% defer the default reply, if any, to name
+    %%  and make sure calling default actually calls name
     %% deferred replies are transient, they aren't saved in the state
-    State#{deferred => util:set(Deferred, Name, Reply)};
-defer_reply(_, State) ->
-    State.
-
-maybe_reply(Response, State = #{incoming := {_, Reply}}) ->
-    %% the default is to try and reply to the incoming message
-    maybe_reply(Reply, Response, State);
-maybe_reply(_, State) ->
-    State.
-
-maybe_reply(undefined, _, State) ->
-    State;
-maybe_reply(#{type := motion, name := Name}, Response, State) ->
-    %% replying to a motion means replying to the motion name
-    maybe_reply(Name, Response, State);
-maybe_reply(Reply, Response, State) when is_function(Reply) ->
-    Reply(Response),
-    State;
-maybe_reply(Name, Response, State = #{deferred := Deferred}) ->
-    %% try and reply to the deferred reply by name
-    %% once the reply is used it gets deleted
-    %% we could also keep a counter if we need to call more than once
-    case util:get(Deferred, Name) of
+    case util:get(Replies, default) of
         undefined ->
             State;
         Reply ->
-            maybe_reply(Reply, Response, util:remove(State, [deferred, Name]))
+            State#{reply => Replies#{default => Name, Name => Reply}}
+    end.
+
+maybe_reply(Response, State) ->
+    maybe_reply(default, Response, State).
+
+maybe_reply(#{yarn := Yarn}, Response, State) ->
+    maybe_reply(Yarn, Response, State);
+maybe_reply(Reply, Response, State) when is_function(Reply) ->
+    Reply(Response),
+    State;
+maybe_reply(Name, Response, State = #{reply := Replies}) ->
+    %% try and reply to the deferred reply by name
+    %% delete reply, so it can only happen once
+    case util:get(Replies, Name) of
+        undefined ->
+            State;
+        Reply ->
+            maybe_reply(Reply, Response, util:remove(State, [reply, Name]))
     end.
 
 after_locus(#{locus := Locus}) ->
@@ -412,7 +400,7 @@ handle_message(Message, Node, IsNew, State = #{spec := Spec}) ->
     %% called to transform state for every message on every node
     %% happens 'at least once', should be externally idempotent
     %% for 'at most once', check if is new
-    State1 = cancel_emit(Message, State),
+    State1 = cancel_yarn(Message, State),
     State2 = handle_builtin(Message, Node, State1),
     Ok = fun () -> maybe_reply(ok, State2) end,
     callback(Spec, {handle_message, 4}, [Message, Node, IsNew, State2], Ok).
@@ -461,32 +449,33 @@ change_peers({remove, [Node|Rest]}, State) ->
 change_peers({_, []}, State) ->
     State.
 
-emit_after(Message, State = #{point := Point}) ->
-    %% emit a message that depends on the current context
-    %% often the point is as good of a sync point as any, but should be after locus too
-    emit_message(Message#{deps => erloom:edge_hull(Point, after_locus(State))}, State).
+%% Yarns serve 3 purposes:
+%%  1. Deferring replies to a message
+%%  2. Generating new information, and communicating it to the group
+%%  3. Preventing the duplicate generation of new information
 
-emit_message(Message, State) ->
-    emit_message(Message, undefined, State).
+create_yarn(Message = #{yarn := Yarn}, State) ->
+    stitch_yarn(Yarn, Message, defer_reply(Yarn, State));
+create_yarn(Message, State) ->
+    %% by default the name of the yarn is based on the current locus
+    %% NB: don't rely on the default name if creating multiple yarns
+    create_yarn(Message#{yarn => after_locus(State)}, State).
 
-emit_message(Message, carry, State = #{incoming := {_, Reply}}) ->
-    emit_message(Message, Reply, State);
-emit_message(Message, carry, State) ->
-    emit_message(Message, undefined, State);
-emit_message(Message = #{name := Name}, Reply, State = #{emits := Emits}) ->
-    State#{emits => util:set(Emits, Name, {Message, Reply})};
-emit_message(Message, Reply, State) ->
-    %% by default assume we saw a message that made us want to emit
-    %% use the after edge of the message we saw as a name for the new message
-    %% the name prevents the message from being emitted again (e.g. during replay)
-    %% NB: don't rely on the default name if emitting multiple messages at a time
-    emit_message(Message#{name => after_locus(State)}, Reply, State).
+stitch_yarn(#{yarn := Yarn}, Message, State) ->
+    stitch_yarn(Yarn, Message, State);
+stitch_yarn(Yarn, Message, State = #{emits := Emits}) ->
+    %% only one message pending per yarn at a time
+    State#{emits => util:set(Emits, {node(), Yarn}, Message#{yarn => Yarn})}.
 
-cancel_emit(#{name := _, type := task}, State) ->
-    State;
-cancel_emit(#{name := Name}, State = #{emits := Emits}) ->
-    State#{emits => util:delete(Emits, Name)};
-cancel_emit(_, State) ->
+suture_yarn(Yarned, Message, State = #{point := Point}) ->
+    %% emit a message that depends on the entire current context
+    %% this is the strongest set of deps we can possibly have here
+    Deps = erloom:edge_hull(Point, after_locus(State)),
+    stitch_yarn(Yarned, Message#{deps => Deps}, State).
+
+cancel_yarn(#{yarn := Yarn}, State = #{emits := Emits}) ->
+    State#{emits => util:delete(Emits, {node(), Yarn})};
+cancel_yarn(_, State) ->
     State.
 
 create_task(Name, Task, State) ->

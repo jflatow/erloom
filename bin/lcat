@@ -13,12 +13,26 @@ main(Homes) ->
 lcat(Home) ->
     erloom_logs:fold(
       fun (Message, {{Node, IId}, {_, After}},  _) ->
-              Vals =
-                  maps:fold(fun (K, V, A) ->
-                                    [io_lib:format("~s=~1024p", [K, V])|A]
-                            end, [], maps:without([type, deps], Message)),
-              Type = util:get(Message, type, "-"),
               Deps = util:get(Message, deps, #{}),
-              Line = util:join(Vals, "\t"),
-              io:format("~s ~s ~p\t~s\t~B\t~s~n", [Node, IId, After, Type, map_size(Deps), Line])
+              Type = util:get(Message, type, "-"),
+              Kind = util:get(Message, kind, "-"),
+              Yarn = util:get(Message, yarn, "-"),
+              Line = line(maps:without([deps, type, kind, yarn], Message)),
+              io:format("~s ~s ~p\t~B\t~-8s\t~-8s\t~-48s\t~s~n", [Node, IId, After, map_size(Deps), Type, Kind, spin(Yarn), Line])
       end, nil, Home).
+
+line(Message) ->
+    util:join(
+      maps:fold(fun (K, V, A) ->
+                        [io_lib:format("~s=~1024p", [K, V])|A]
+                end, [], Message), "\t").
+
+spin(Yarn) when is_map(Yarn) ->
+    util:join(
+      maps:fold(fun (K, {X, Y}, A) when is_atom(K), is_binary(X) ->
+                        [io_lib:format("~s ~s ~p", [K, X, Y])|A];
+                    (K, V, A) ->
+                        [io_lib:format("~p:~p", [K, V])|A]
+                end, [], Yarn), "/");
+spin(Yarn) ->
+    Yarn.

@@ -29,7 +29,7 @@ motion(Motion = #{fiat := _}, State) ->
                 type => motion,
                 deps => util:lookup(State, [elect, known])
                },
-    loom:emit_message(Motion1, State);
+    loom:create_yarn(Motion1, State);
 motion(Motion, State) ->
     %% not a fiat, voting predicated on currently believed conf
     Motion1 = Motion#{
@@ -44,7 +44,7 @@ motion(Motion, State) ->
             _ ->
                 {Motion1, State}
         end,
-    loom:emit_message(Motion2, State1).
+    loom:create_yarn(Motion2, State1).
 
 is_descendant(Id, Id, _Elect) ->
     true;
@@ -128,13 +128,13 @@ delete_motion(MotionId, #{deps := ParentId}, State = #{elect := Elect}) ->
         end,
     util:set(State, elect, util:remove(Elect1, MotionId)).
 
-vote(MotionId, Vote, State) ->
+vote(MotionId, Motion, Vote, State) ->
     Ballot = #{
       deps => MotionId,
       type => ballot,
       vote => Vote
      },
-    loom:emit_message(Ballot, State).
+    loom:stitch_yarn(Motion, Ballot, State).
 
 affirm_config(#{type := Type, deps := ConfId}, Node, State) ->
     %% when a conf changes the peer group, we keep a list of nodes that need start / stop
@@ -182,10 +182,10 @@ handle_motion(Motion = #{deps := ConfId}, Node, State) ->
                                         %% the motion has the 'right' electorate
                                         Mover = get_mover(MotionId),
                                         {Vote, S} = vote_on_motion(Motion, Mover, State1),
-                                        vote(MotionId, Vote, S);
+                                        vote(MotionId, Motion, Vote, S);
                                     _ ->
                                         %% we don't agree about the electorate
-                                        vote(MotionId, {nay, electorate}, State1)
+                                        vote(MotionId, Motion, {nay, electorate}, State1)
                                 end;
                             false ->
                                 %% not part of the motion's electorate, our vote won't count anyway
@@ -317,7 +317,7 @@ reflect_decision(MotionId, {Kids, Motion, _}, Decision = {true, _}, State = #{el
                 S1 = State#{elect => Elect2},
                 S2 = murder_conf_siblings(MotionId, S1),
                 S3 = update_conf_peers(MotionId, MotionInfo, S2),
-                loom:emit_after(#{name => {conf, MotionId}}, S3);
+                loom:suture_yarn(Motion, #{type => conf}, S3);
             _ ->
                 %% the motion was not a conf change, no need to keep it around
                 delete_motion(MotionId, Motion, State)
