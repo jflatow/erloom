@@ -325,7 +325,7 @@ reflect_decision(MotionId, {Kids, Motion, _}, Decision = {true, _}, State = #{el
                 S1 = State#{elect => Elect2},
                 S2 = murder_conf_siblings(MotionId, S1),
                 S3 = update_conf_peers(MotionId, MotionInfo, S2),
-                loom:suture_yarn(Motion, #{type => conf}, S3);
+                loom:suture_yarn(Motion, #{type => barrier, kind => conf}, S3);
             _ ->
                 %% the motion was not a conf change, no need to keep it around
                 delete_motion(MotionId, Motion, State)

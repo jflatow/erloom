@@ -10,23 +10,21 @@
 task(Name, Task, State) ->
     task(Name, Task, loom:after_locus(State), State).
 
-task(Name, Task, Deps, State = #{tasks := Tasks}) ->
-    %% create task for name, if and only if not already created
-    %% names should normally be unique to begin with
-    case util:get(Tasks, Name) of
-        undefined ->
-            %% just insert into the table, it gets run once tasks are launched
-            State#{tasks => Tasks#{Name => {undefined, Task, Deps}}};
-        _ ->
-            %% existing tasks always take precedence
-            State
-    end.
+task(Name, Task, Deps, State) ->
+    %% just insert into the table, it gets run once tasks are launched
+    %% pile up tasks with the same name
+    util:modify(State, [tasks, Name],
+                fun (undefined) ->
+                        {undefined, [{Task, Deps}]};
+                    ({Pid, Stack}) ->
+                        {Pid, [{Task, Deps}|Stack]}
+                end).
 
-handle_task(#{name := Name, retry := Arg}, State = #{tasks := Tasks}) ->
-    case util:get(Tasks, Name) of
-        {P, {F, _}, D} ->
+handle_task(#{name := Name, retry := Arg}, State) ->
+    case util:lookup(State, [tasks, Name]) of
+        {Pid, [{{Fun, _}, Deps}|Stack]} ->
             %% update the arg, it will be used if we respawn
-            State#{tasks => Tasks#{Name => {P, {F, Arg}, D}}};
+            util:modify(State, [tasks, Name], {Pid, [{{Fun, Arg}, Deps}|Stack]});
         undefined ->
             %% if the task was killed, retry could appear after removal
             State
@@ -34,18 +32,26 @@ handle_task(#{name := Name, retry := Arg}, State = #{tasks := Tasks}) ->
 handle_task(#{name := Name, kill := _}, State) ->
     %% allow outsiders to safely stop the task
     case util:lookup(State, [tasks, Name]) of
-        {P, _, _} when is_pid(P) ->
+        {P, _} when is_pid(P) ->
             exit(P, silent);
         _ ->
             ok
     end,
-    util:remove(State, [tasks, Name]);
+    pop_task(Name, State);
 handle_task(#{name := Name, done := _}, State) ->
-    util:remove(State, [tasks, Name]);
+    pop_task(Name, State);
 handle_task(#{name := Name, fail := _}, State) ->
-    util:remove(State, [tasks, Name]).
+    pop_task(Name, State).
 
-spawn_task(Name, {Fun, Arg}, Deps, State = #{listener := L}) ->
+pop_task(Name, State = #{tasks := Tasks}) ->
+    case util:get(Tasks, Name) of
+        {_, [_]} ->
+            util:remove(State, [tasks, Name]);
+        {_, [_|Stack]} ->
+            util:modify(State, [tasks, Name], {spawn_task(Name, Stack, State), Stack})
+    end.
+
+spawn_task(Name, [{{Fun, Arg}, Deps}|_], State = #{listener := L}) ->
     Run =
         fun Loop(A, S) ->
                 case catch Fun(A, S) of
@@ -76,19 +82,19 @@ pause_tasks(State = #{tasks := Tasks}) ->
     %% silently exit tasks, and mark them all as unlaunched
     Tasks1 =
         util:map(Tasks,
-                 fun ({P, T, D}) when is_pid(P) ->
-                         exit(P, silent),
-                         {undefined, T, D};
-                     ({_, T, D}) ->
-                         {undefined, T, D}
+                 fun ({Pid, Stack}) when is_pid(Pid) ->
+                         exit(Pid, silent),
+                         {undefined, Stack};
+                     ({undefined, Stack}) ->
+                         {undefined, Stack}
                  end),
     State#{tasks => Tasks1}.
 
 launch_tasks(State = #{tasks := Tasks}) ->
     %% launch any unlaunched tasks (i.e. only after we are working off tip)
     Tasks1 =
-        maps:fold(fun (Name, {undefined, Task, Deps}, Acc) ->
-                          Acc#{Name => {spawn_task(Name, Task, Deps, State), Task}};
+        maps:fold(fun (Name, {undefined, Stack}, Acc) ->
+                          Acc#{Name => {spawn_task(Name, Stack, State), Stack}};
                       (_, _, Acc) ->
                           Acc
                   end, Tasks, Tasks),
@@ -98,5 +104,5 @@ restart_tasks(State = #{tasks := Tasks}) ->
     %% restart all tasks in the table (i.e. after we wake up)
     %% mark everything as unlaunched, then launch
     %% NB: we don't pause and launch, as the Pids might be stale (though not likely)
-    Tasks1 = util:map(Tasks, fun ({_, T, D}) -> {undefined, T, D} end),
+    Tasks1 = util:map(Tasks, fun ({_, Stack}) -> {undefined, Stack} end),
     launch_tasks(State#{tasks => Tasks1}).

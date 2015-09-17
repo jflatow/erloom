@@ -22,7 +22,7 @@
            }.
 -type message() :: #{
                deps => erloom:edge(),
-               type => start | stop | motion | ballot | move | task | lookup | modify | remove | term(),
+               type => start | stop | motion | ballot | move | task | lookup | modify | remove | barrier | term(),
                kind => term(),
                yarn => term()
               }.
