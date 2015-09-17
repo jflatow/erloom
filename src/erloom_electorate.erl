@@ -2,6 +2,7 @@
 
 -export([create/2,
          motion/2,
+         tether/2,
          affirm_config/3,
          handle_motion/3,
          handle_ballot/3]).
@@ -45,6 +46,13 @@ motion(Motion, State) ->
                 {Motion1, State}
         end,
     loom:create_yarn(Motion2, State1).
+
+tether(Change = #{path := Path}, State) ->
+    Change1 = Change#{
+                kind => chain,
+                prior => erloom_chain:version(State, Path)
+               },
+    motion(Change1, State).
 
 is_descendant(Id, Id, _Elect) ->
     true;
@@ -348,14 +356,13 @@ reflect_decision(MotionId, {Kids, Motion, _}, Decision, State = #{elect := Elect
 vote_on_motion(#{kind := conf}, _, State) ->
     {{yea, ok}, State};
 vote_on_motion(#{kind := chain, path := Path, prior := Prior}, _, State) ->
-    case util:lookup(State, Path, {undefined, undefined}) of
+    case erloom_chain:lookup(State, Path) of
         {_, _, locked} ->
             %% the path is locked, cannot accept
             {{nay, locked}, State};
-        {Value, Prior} ->
-            %% the prior matches, accept and lock
-            State1 = util:modify(State, Path, {Value, Prior, locked}),
-            {{yea, ok}, State1};
+        {_, Prior} ->
+            %% the prior matches, accept by locking
+            {{yea, ok}, erloom_chain:lock(State, Path)};
         {_, _} ->
             %% the prior doesn't match, cannot accept
             {{nay, version}, State}
@@ -371,15 +378,10 @@ motion_decided(MotionId, #{kind := chain, path := Path} = Motion, Mover, Decisio
             {true, _} ->
                 %% passed a motion to chain: store value and bump version
                 Value = util:get(Motion, value),
-                Version = MotionId,
-                util:modify(State, Path, {Value, Version});
+                erloom_chain:modify(State, Path, {Value, MotionId});
             _ ->
                 %% failed to chain: unlock
-                util:modify(State, Path, fun ({Value, Version}) ->
-                                                 {Value, Version};
-                                             ({Value, Version, locked}) ->
-                                                 {Value, Version}
-                                         end)
+                erloom_chain:unlock(State, Path)
         end,
     loom:motion_decided(Motion, Mover, Decision, State1);
 motion_decided(_MotionId, Motion, Mover, Decision, State) ->

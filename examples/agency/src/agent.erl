@@ -22,13 +22,15 @@ opts({agent, _}) ->
 
 write_through(#{do := get_state}, _N, _State) ->
     {0, infinity};
+write_through(#{type := lookup}, _N, _State) ->
+    {0, infinity};
 write_through(#{write := W}, _N, _State) when is_integer(W) ->
     {W, 1000};
 write_through(_Message, _N, _State) ->
     {1, infinity}.
 
 handle_message(#{do := save}, _Node, true, State) ->
-    loom:maybe_reply(ok, loom:save(State));
+    loom:maybe_reply(loom:save(State));
 handle_message(#{do := get_state}, _Node, true, State) ->
     loom:maybe_reply(State, State);
 handle_message(#{do := emit}, _Node, true, State) ->
@@ -36,21 +38,21 @@ handle_message(#{do := emit}, _Node, true, State) ->
 handle_message(#{do := reply}, _Node, true, State) ->
     loom:maybe_reply(got_it, State);
 handle_message(#{chain := {Path, Value}}, _Node, true, State) ->
-    loom:chain_value(Path, Value, State);
+    loom:maybe_chain(#{path => Path, value => Value}, State);
 handle_message(#{type := start}, Node, true, State) ->
     io:format("~p started~n", [Node]),
-    loom:maybe_reply(ok, State);
+    loom:maybe_reply(State);
 handle_message(#{type := stop}, Node, true, State) ->
     io:format("~p stopped~n", [Node]),
-    loom:maybe_reply(ok, State);
+    loom:maybe_reply(State);
 handle_message(#{type := task, name := Name, done := _}, Node, true, State) ->
     io:format("~p completed task ~p~n", [Node, Name]),
-    loom:maybe_reply(ok, State);
+    loom:maybe_reply(State);
 handle_message(#{write := _}, _, true, State = #{wrote := Wrote}) ->
     loom:maybe_reply(Wrote, State);
 handle_message(Message, Node, true, State) ->
     io:format("~p new message: ~p~n", [Node, Message]),
-    loom:maybe_reply(ok, State);
+    loom:maybe_reply(State);
 handle_message(_, _, false, State) ->
     State.
 
@@ -59,7 +61,9 @@ vote_on_motion(#{yarn := Yarn}, Mover, State) ->
     {{yea, ok}, State}.
 
 motion_decided(#{kind := chain, path := xyz} = Motion, Mover, {true, _}, State) when Mover =:= node() ->
-    State1 = loom:suture_yarn(Motion, #{type => op, store => [generated, data]}, State),
+    GenVal = base64url:encode(crypto:rand_bytes(8)),
+    Modify = #{type => modify, kind => chain, path => xyz, value => GenVal},
+    State1 = loom:suture_yarn(Motion, Modify, State),
     loom:maybe_reply(Motion, [Mover, 'did pass chain'], State1);
 motion_decided(#{yarn := Yarn} = Motion, Mover, Decision, State) ->
     io:format("~p decided ~p for ~p from ~p~n", [node(), Decision, Yarn, Mover]),

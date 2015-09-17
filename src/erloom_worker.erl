@@ -50,10 +50,10 @@ done(State = #{listener := Listener, status := Status}) ->
     Listener ! {worker_done, State1},
     wait().
 
-store_default(#{yarn := Yarn}, undefined, State = #{reply := Replies}) ->
-    State#{reply => Replies#{default => Yarn}};
-store_default(_Message, Reply, State = #{reply := Replies}) ->
-    State#{reply => Replies#{default => Reply}}.
+store_default(Message = #{yarn := Yarn}, undefined, State = #{reply := Replies}) ->
+    State#{reply => Replies#{default => Yarn}, message => Message, response => ok};
+store_default(Message, Reply, State = #{reply := Replies}) ->
+    State#{reply => Replies#{default => Reply}, message => Message, response => ok}.
 
 clear_default(State) ->
     util:remove(State, [reply, default]).

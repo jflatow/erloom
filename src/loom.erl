@@ -22,7 +22,7 @@
            }.
 -type message() :: #{
                deps => erloom:edge(),
-               type => start | stop | motion | ballot | move | task | term(),
+               type => start | stop | motion | ballot | move | task | lookup | modify | remove | term(),
                kind => term(),
                yarn => term()
               }.
@@ -48,7 +48,9 @@
              elect => #{},
              emits => [{term(), message()}],
              tasks => #{term() => {pid() | undefined, {module(), atom(), list()}}},
-             reply => #{}
+             reply => #{},
+             message => message() | undefined,
+             response => term()
             }.
 
 -type vote() :: {yea, term()} | {nay, term()}.
@@ -121,6 +123,7 @@
          stop/2,
          after_locus/1,
          defer_reply/2,
+         maybe_reply/1,
          maybe_reply/2,
          maybe_reply/3,
          unmet_deps/2,
@@ -144,7 +147,7 @@
          cancel_yarn/2,
          create_task/3,
          make_motion/2,
-         chain_value/3]).
+         maybe_chain/2]).
 
 %% 'send' is the main entry point for communicating with the loom
 %% returns the (local) pid for the loom which can be cached
@@ -313,6 +316,9 @@ defer_reply(Name, State = #{reply := Replies}) ->
             State#{reply => Replies#{default => Name, Name => Reply}}
     end.
 
+maybe_reply(State) ->
+    maybe_reply(util:get(State, response), State).
+
 maybe_reply(Response, State) ->
     maybe_reply(default, Response, State).
 
@@ -393,6 +399,16 @@ handle_builtin(Message = #{type := task}, Node, State) when Node =:= node() ->
     %% task messages are for the surety to either retry or complete a task
     %% tasks run per node, transferring control is outside the scope
     erloom_surety:handle_task(Message, State);
+handle_builtin(#{type := lookup, path := Path, kind := chain}, _Node, State) ->
+    State#{response => element(1, erloom_chain:lookup(State, Path))};
+handle_builtin(#{type := lookup, path := Path}, _Node, State) ->
+    State#{response => util:lookup(State, Path)};
+handle_builtin(#{type := modify, path := Path, value := Value, kind := chain}, _Node, State) ->
+    erloom_chain:modify(State, Path, {Value, after_locus(State)});
+handle_builtin(#{type := modify, path := Path, value := Value}, _Node, State) ->
+    util:modify(State, Path, Value);
+handle_builtin(#{type := remove, path := Path}, _Node, State) ->
+    util:remove(State, Path);
 handle_builtin(_Message, _Node, State) ->
     State.
 
@@ -402,8 +418,8 @@ handle_message(Message, Node, IsNew, State = #{spec := Spec}) ->
     %% for 'at most once', check if is new
     State1 = cancel_yarn(Message, State),
     State2 = handle_builtin(Message, Node, State1),
-    Ok = fun () -> maybe_reply(ok, State2) end,
-    callback(Spec, {handle_message, 4}, [Message, Node, IsNew, State2], Ok).
+    Respond = fun () -> maybe_reply(State2) end,
+    callback(Spec, {handle_message, 4}, [Message, Node, IsNew, State2], Respond).
 
 vote_on_motion(Motion, Mover, State = #{spec := Spec}) ->
     callback(Spec, {vote_on_motion, 3}, [Motion, Mover, State], {{yea, ok}, State}).
@@ -470,6 +486,8 @@ stitch_yarn(Yarn, Message, State = #{emits := Emits}) ->
 suture_yarn(Yarned, Message, State = #{point := Point}) ->
     %% emit a message that depends on the entire current context
     %% this is the strongest set of deps we can possibly have here
+    %% NB: reserve the right to treat builtin types (i.e. motion) differently
+    %%     e.g. only needs to depend on ratifying votes instead of full point
     Deps = erloom:edge_hull(Point, after_locus(State)),
     stitch_yarn(Yarned, Message#{deps => Deps}, State).
 
@@ -486,15 +504,5 @@ create_task(Name, Task, State) ->
 make_motion(Motion, State) ->
     erloom_electorate:motion(Motion, State).
 
-chain_value(Path, Value, State) ->
-    case util:lookup(State, Path, {undefined, undefined}) of
-        {_, Prior} ->
-            make_motion(#{
-                           kind => chain,
-                           path => Path,
-                           prior => Prior,
-                           value => Value
-                         }, State);
-        {_, _, locked} ->
-            {retry, locked}
-    end.
+maybe_chain(Change, State) ->
+    erloom_electorate:tether(Change, State).
