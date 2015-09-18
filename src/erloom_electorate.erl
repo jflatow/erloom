@@ -162,22 +162,18 @@ affirm_config(#{type := Type, deps := ConfId}, Node, State) ->
             State
     end.
 
-handle_motion(Motion, Node, State) when Node =:= node() ->
-    %% its our motion, no need to emit if we were going to
+handle_motion(Motion = #{deps := ConfId}, Mover, State) ->
     MotionId = get_motion_id(Motion, State),
-    State1 = maybe_save_motion(Motion, MotionId, State),
-    handle_ballot(Motion, Node, State1);
-handle_motion(Motion = #{deps := ConfId}, Node, State) ->
-    %% not our motion, we should maybe try to vote on it
-    MotionId = get_motion_id(Motion, State),
-    Mover = get_mover(MotionId),
     State1 = maybe_save_motion(Motion, MotionId, State),
     case util:lookup(State1, [elect, MotionId]) of
         undefined ->
-            %% the motion must have been predicated on an impossible electorate
-            motion_decided(MotionId, Motion, Mover, {false, premise}, State1);
+            %% we didn't save, must have been predicated on an impossible electorate
+            resolve_motion(MotionId, Motion, Mover, {false, premise}, State1);
+        _ when Mover =:= node() ->
+            %% its our motion, no need to emit if we were going to
+            handle_ballot(Motion, Mover, State1);
         _ ->
-            %% we successfully saved the motion, the premise is a possibility
+            %% not our motion, we should maybe try to vote on it
             State2 =
                 case util:get(Motion, fiat) of
                     undefined ->
@@ -188,7 +184,6 @@ handle_motion(Motion = #{deps := ConfId}, Node, State) ->
                                 case util:lookup(State1, [elect, current]) of
                                     ConfId ->
                                         %% the motion has the 'right' electorate
-                                        Mover = get_mover(MotionId),
                                         {Vote, S} = vote_on_motion(Motion, Mover, State1),
                                         vote(MotionId, Motion, Vote, S);
                                     _ ->
@@ -203,7 +198,7 @@ handle_motion(Motion = #{deps := ConfId}, Node, State) ->
                         %% its a fiat, no need to vote
                         State1
                 end,
-            handle_ballot(Motion, Node, State2)
+            handle_ballot(Motion, Mover, State2)
     end.
 
 handle_ballot(Ballot, Node, State) when Node =:= node() ->
@@ -330,7 +325,7 @@ reflect_decision(MotionId, {Kids, Motion, _}, Decision = {true, _}, State = #{el
                 %% the motion was not a conf change, no need to keep it around
                 delete_motion(MotionId, Motion, State)
         end,
-    State2 = motion_decided(MotionId, Motion, Mover, Decision, State1),
+    State2 = resolve_motion(MotionId, Motion, Mover, Decision, State1),
     lists:foldl(fun (Kid, S = #{elect := E}) ->
                         reckon_elections(Kid, util:get(E, Kid), S)
                 end, State2, Kids);
@@ -348,7 +343,7 @@ reflect_decision(MotionId, {Kids, Motion, _}, Decision, State = #{elect := Elect
                 State
         end,
     State2 = delete_motion(MotionId, Motion, State1),
-    State3 = motion_decided(MotionId, Motion, Mover, Decision, State2),
+    State3 = resolve_motion(MotionId, Motion, Mover, Decision, State2),
     lists:foldl(fun (Kid, S = #{elect := E}) ->
                         reflect_decision(Kid, util:get(E, Kid), {false, premise}, S)
                 end, State3, Kids).
@@ -370,9 +365,7 @@ vote_on_motion(#{kind := chain, path := Path, prior := Prior}, _, State) ->
 vote_on_motion(Motion, Mover, State) ->
     loom:vote_on_motion(Motion, Mover, State).
 
-motion_decided(MotionId, #{kind := chain, path := Path} = Motion, Mover, Decision, State) ->
-    %% NB: motion id must be passed in, do the callbacks need it too? get_motion_id wont work here
-    %%     in general from motion_decided we should use the motion id to emit, etc.
+resolve_motion(MotionId, #{kind := chain, path := Path} = Motion, Mover, Decision, State) ->
     State1 =
         case Decision of
             {true, _} ->
@@ -383,8 +376,26 @@ motion_decided(MotionId, #{kind := chain, path := Path} = Motion, Mover, Decisio
                 %% failed to chain: unlock
                 erloom_chain:unlock(State, Path)
         end,
+    motion_decided(Motion, Mover, Decision, State1);
+resolve_motion(_MotionId, Motion, Mover, Decision, State) ->
+    motion_decided(Motion, Mover, Decision, State).
+
+motion_decided(Motion = #{retry := true}, Mover, Decision = {false, _}, State) when Mover =:= node() ->
+    %% if the caller expects the motion to eventually pass (i.e. transient failures)
+    %% it can use retry / limit to have the mover reissue failed motions automatically
+    %% in general we should suture (not stitch) from 'motion_decided'
+    %% otherwise replay of emit could occur before the decision, causing re-emit
+    State1 =
+        case util:get(Motion, limit) of
+            undefined ->
+                loom:suture_yarn(Motion, Motion#{type => move}, State);
+            N when is_integer(N), N > 0 ->
+                loom:suture_yarn(Motion, Motion#{type => move, limit => N - 1}, State);
+            _ ->
+                State
+        end,
     loom:motion_decided(Motion, Mover, Decision, State1);
-motion_decided(_MotionId, Motion, Mover, Decision, State) ->
+motion_decided(Motion, Mover, Decision, State) ->
     loom:motion_decided(Motion, Mover, Decision, State).
 
 tally_votes(_MotionId, {_, Motion, Votes}, State) ->

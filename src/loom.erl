@@ -60,7 +60,9 @@
               kind => conf | chain | term(),
               conf => {add | remove | set, [node()]},
               vote => vote(),
-              fiat => decision()
+              fiat => decision(),
+              retry => boolean(),
+              limit => non_neg_integer()
 }.
 -type ballot() :: #{  %% + message
               type => ballot,
