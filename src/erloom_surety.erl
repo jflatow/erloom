@@ -1,35 +1,38 @@
 -module(erloom_surety).
 
--export([task/3,
-         task/4,
-         handle_task/2,
+-export([task/4,
+         handle_task/3,
          pause_tasks/1,
          launch_tasks/1,
          restart_tasks/1]).
 
-task(Name, Task, State) ->
-    task(Name, Task, loom:after_locus(State), State).
-
-task(Name, Task, Deps, State) ->
+task(Base = #{name := Name}, Node, Task, State) ->
     %% just insert into the table, it gets run once tasks are launched
-    %% pile up tasks with the same name
+    %% the task only gets launched on the specified node, but all nodes are aware of it
+    %% this means tasks with the same name are queued globally, which is very useful
+    %% messages emitted by the task will be based on the base
+    %% generally it should depend at least on whatever triggered the task
+    %%  one may also embed a yarn inside the base
+    %% NB: if tasks with the same name are triggered by unordered messages
+    %%  or if a task is triggered by the same message for different nodes
+    %%  the queue on each node may reflect different truths
     util:modify(State, [tasks, Name],
                 fun (undefined) ->
-                        {undefined, [{Task, Deps}]};
+                        {undefined, [{Node, {Task, Base}}]};
                     ({Pid, Stack}) ->
-                        {Pid, [{Task, Deps}|Stack]}
+                        {Pid, Stack ++ [{Node, {Task, Base}}]}
                 end).
 
-handle_task(#{name := Name, retry := Arg}, State) ->
-    case util:lookup(State, [tasks, Name]) of
-        {Pid, [{{Fun, _}, Deps}|Stack]} ->
-            %% update the arg, it will be used if we respawn
-            util:modify(State, [tasks, Name], {Pid, [{{Fun, Arg}, Deps}|Stack]});
-        undefined ->
-            %% if the task was killed, retry could appear after removal
-            State
-    end;
-handle_task(#{name := Name, kill := _}, State) ->
+handle_task(#{kind := retry, name := Name, value := Arg}, Node, State) ->
+    util:replace(State, [tasks, Name],
+                 fun ({Pid, Stack}) ->
+                         %% update the arg, it will be used if we respawn
+                         {Pid, util:replace(Stack, Node,
+                                            fun ({{Fun, _}, Base}) ->
+                                                    {{Fun, Arg}, Base}
+                                            end)}
+                 end);
+handle_task(#{kind := kill, name := Name} = Message, Node, State) ->
     %% allow outsiders to safely stop the task
     case util:lookup(State, [tasks, Name]) of
         {P, _} when is_pid(P) ->
@@ -37,21 +40,35 @@ handle_task(#{name := Name, kill := _}, State) ->
         _ ->
             ok
     end,
-    pop_task(Name, State);
-handle_task(#{name := Name, done := _}, State) ->
-    pop_task(Name, State);
-handle_task(#{name := Name, fail := _}, State) ->
-    pop_task(Name, State).
+    complete_task(Message, Node, State);
+handle_task(#{kind := done} = Message, Node, State) ->
+    complete_task(Message, Node, State);
+handle_task(#{kind := fail} = Message, Node, State) ->
+    complete_task(Message, Node, State).
 
-pop_task(Name, State = #{tasks := Tasks}) ->
-    case util:get(Tasks, Name) of
-        {_, [_]} ->
-            util:remove(State, [tasks, Name]);
-        {_, [_|Stack]} ->
-            util:modify(State, [tasks, Name], {spawn_task(Name, Stack, State), Stack})
-    end.
+complete_task(#{name := Name, value := Result} = Message, Node, State) ->
+    State1 =
+        case util:lookup(State, [tasks, Name]) of
+            {_Pid, Stack} ->
+                %% remove the first task with name / node
+                case lists:keydelete(Node, 1, Stack) of
+                    [] ->
+                        %% if stack is empty, delete the whole thing
+                        util:remove(State, [tasks, Name]);
+                    Stack1 ->
+                        %% spawn the next task (maybe, if its ours)
+                        Pid1 = spawn_task(Name, Stack1, State),
+                        util:modify(State, [tasks, Name], {Pid1, Stack1})
+                end;
+            _ ->
+                %% somehow doesn't exist, can't happen normally, but keep going anyway
+                State
+        end,
+    loom:task_completed(Message, Node, Result, State1).
 
-spawn_task(Name, [{{Fun, Arg}, Deps}|_], State = #{listener := L}) ->
+spawn_task(_, [{Node, _}|_], _) when Node =/= node() ->
+    undefined;
+spawn_task(_, [{_, {{Fun, Arg}, Base}}|_], State = #{listener := L}) ->
     Run =
         fun Loop(A, S) ->
                 case catch Fun(A, S) of
@@ -66,14 +83,14 @@ spawn_task(Name, [{{Fun, Arg}, Deps}|_], State = #{listener := L}) ->
                         %%  3. try the next arg with an additional wait penalty
                         %% regardless, we can't avoid the possibility of repeating an arg
                         %% crashing is rare, all options have issues: do something simple (#2)
-                        loom:call(L, #{type => task, deps => Deps, name => Name, retry => A1}),
+                        loom:call(L, Base#{type => task, kind => retry, value => A1}),
                         receive after time:timeout(Wait) -> Loop(A1, loom:state(L)) end;
                     {done, Result} ->
                         %% when we are done, notify the loom so we can finish the task
-                        loom:call(L, #{type => task, deps => Deps, name => Name, done => Result});
+                        loom:call(L, Base#{type => task, kind => done, value => Result});
                     Other ->
                         %% user failure happens, treat it like done but different
-                        loom:call(L, #{type => task, deps => Deps, name => Name, fail => Other})
+                        loom:call(L, Base#{type => task, kind => fail, value => Other})
                 end
         end,
     spawn_link(fun () -> Run(Arg, State) end).

@@ -22,8 +22,9 @@
            }.
 -type message() :: #{
                deps => erloom:edge(),
-               type => start | stop | motion | ballot | move | task | lookup | modify | remove | barrier | term(),
-               kind => term(),
+               refs => erloom:loci(),
+               type => start | stop | move | motion | ballot | ratify | fence | task | lookup | modify | remove | atom(),
+               kind => atom(),
                yarn => term()
               }.
 -type reply() :: fun((term()) -> term()).
@@ -50,17 +51,18 @@
              tasks => #{term() => {pid() | undefined, {module(), atom(), list()}}},
              reply => #{},
              message => message() | undefined,
-             response => term()
+             response => term(),
+             former => term()
             }.
 
 -type vote() :: {yea, term()} | {nay, term()}.
 -type decision() :: {boolean(), term()}.
 -type motion() :: #{  %% + message
               type => motion,
-              kind => conf | chain | term(),
-              conf => {add | remove | set, [node()]},
+              kind => conf | chain | atom(),
               vote => vote(),
               fiat => decision(),
+              value => {add | remove | set, [node()]},
               retry => boolean(),
               limit => non_neg_integer()
 }.
@@ -84,6 +86,7 @@
 -callback handle_message(message(), node(), boolean(), state()) -> state().
 -callback vote_on_motion(motion(), node(), state()) -> {vote(), state()}.
 -callback motion_decided(motion(), node(), decision(), state()) -> state().
+-callback task_completed(message(), node(), term(), state()) -> state().
 -callback handle_info(term(), state()) -> state().
 -callback handle_idle(state()) -> state().
 -callback check_node(node(), pos_integer(), state()) -> state().
@@ -97,6 +100,7 @@
                      handle_message/4,
                      vote_on_motion/3,
                      motion_decided/4,
+                     task_completed/4,
                      handle_info/2,
                      handle_idle/1,
                      check_node/3]).
@@ -105,8 +109,6 @@
          send/3,
          call/2,
          call/3,
-         move/2,
-         move/3,
          state/1,
          multicall/2,
          multicall/3,
@@ -124,16 +126,18 @@
          start/2,
          stop/2,
          after_locus/1,
+         after_point/1,
          defer_reply/2,
          maybe_reply/1,
          maybe_reply/2,
          maybe_reply/3,
-         unmet_deps/2,
+         unmet_needs/2,
          verify_message/2,
          write_through/3,
          handle_message/4,
          vote_on_motion/3,
          motion_decided/4,
+         task_completed/4,
          handle_info/2,
          handle_idle/1,
          check_node/3]).
@@ -144,10 +148,11 @@
 -export([change_peers/2]).
 
 -export([create_yarn/2,
-         stitch_yarn/3,
-         suture_yarn/3,
-         cancel_yarn/2,
-         create_task/3,
+         stitch_yarn/2,
+         suture_yarn/2,
+         create_task/4,
+         stitch_task/4,
+         suture_task/4,
          make_motion/2,
          maybe_chain/2]).
 
@@ -182,14 +187,6 @@ call(Spec, Message, Timeout) ->
         Timeout ->
             {error, timeout}
     end.
-
-%% 'move' signals the node to make a motion
-
-move(Spec, Motion) ->
-    move(Spec, Motion, infinity).
-
-move(Spec, Motion, Timeout) ->
-    call(Spec, Motion#{type => move}, Timeout).
 
 %% 'state' gets a recent snapshot of the loom state
 
@@ -324,8 +321,6 @@ maybe_reply(State) ->
 maybe_reply(Response, State) ->
     maybe_reply(default, Response, State).
 
-maybe_reply(#{yarn := Yarn}, Response, State) ->
-    maybe_reply(Yarn, Response, State);
 maybe_reply(Reply, Response, State) when is_function(Reply) ->
     Reply(Response),
     State;
@@ -342,15 +337,39 @@ maybe_reply(Name, Response, State = #{reply := Replies}) ->
 after_locus(#{locus := Locus}) ->
     erloom:locus_after(Locus).
 
-unmet_deps(#{deps := Deps}, #{point := Point}) ->
-    case erloom:edge_delta(Deps, Point) of
+after_point(#{point := Point} = State) ->
+    %% after point includes the locus, otherwise just use the point
+    erloom:edge_hull(Point, after_locus(State)).
+
+min_deps(Message, #{locus := {{Node, _}, _}}) when Node =:= node() ->
+    %% messages on the same node are ordered even without deps
+    Message;
+min_deps(Message, State) ->
+    %% message on another node, extend deps to after locus, minus refs
+    Deps = util:get(Message, deps, #{}),
+    Refs = util:get(Message, refs, []),
+    Deps1 = erloom:edge_hull(Deps, after_locus(State)),
+    case erloom:edge_delta(Deps1, erloom:loci_after(Refs)) of
+        Delta when map_size(Delta) > 0 ->
+            Message#{deps => erloom:delta_upper(Delta)};
+        _ ->
+            Message
+    end.
+
+max_deps(Message, State) ->
+    %% this is the strongest set of deps we can possibly have in this context
+    Message#{deps => after_point(State)}.
+
+unmet_needs(Message, #{point := Point}) ->
+    Deps = util:get(Message, deps, #{}),
+    Refs = util:get(Message, refs, []),
+    Needs = erloom:edge_hull(Deps, erloom:loci_after(Refs)),
+    case erloom:edge_delta(Needs, Point) of
         Delta when map_size(Delta) > 0 ->
             erloom:delta_upper(Delta);
         _ ->
             nil
-    end;
-unmet_deps(_Message, _State) ->
-    nil.
+    end.
 
 ready_to_accept(#{type := start}, _State) ->
     {true, start};
@@ -366,7 +385,7 @@ verify_message(Message, State = #{spec := Spec}) ->
     %% at a minimum, we must be ready to accept, and any dependencies must be met
     case ready_to_accept(Message, State) of
         {true, _} ->
-            case unmet_deps(Message, State) of
+            case unmet_needs(Message, State) of
                 nil ->
                     callback(Spec, {verify_message, 2}, [Message, State], {ok, Message, State});
                 Deps ->
@@ -382,35 +401,50 @@ write_through(Message, N, State = #{spec := Spec}) ->
     %% how many copies of a message are required for a successful write? in what timeframe?
     callback(Spec, {write_through, 3}, [Message, N, State], {1, infinity}).
 
+cancel_builtin(#{yarn := Yarn}, Node, State) when Node =:= node() ->
+    %% cancel pending emit of a yarn every time we see one
+    util:remove(State, [emits, {node(), Yarn}]);
+cancel_builtin(_, _, State) ->
+    State.
+
 handle_builtin(#{type := start, seed := Nodes}, Node, State) ->
     %% the seed message sets the initial electorate, and thus the peer group
     %% every node in the group should see / refer to the same seed message
-    erloom_electorate:create(Nodes, start(Node, State));
+    erloom_electorate:create(Nodes, Node, start(Node, State));
 handle_builtin(Message = #{type := start}, Node, State) ->
-    erloom_electorate:affirm_config(Message, Node, start(Node, State));
+    erloom_electorate:handle_ctrl(Message, Node, start(Node, State));
 handle_builtin(Message = #{type := stop}, Node, State) ->
-    erloom_electorate:affirm_config(Message, Node, stop(Node, State));
+    erloom_electorate:handle_ctrl(Message, Node, stop(Node, State));
+
+handle_builtin(Message = #{type := move}, Node, State) when Node =:= node() ->
+    %% its convenient to be able to push a node to make a motion
+    erloom_electorate:motion(Message, State);
 handle_builtin(Message = #{type := motion}, Node, State) ->
     erloom_electorate:handle_motion(Message, Node, State);
 handle_builtin(Message = #{type := ballot}, Node, State) ->
     erloom_electorate:handle_ballot(Message, Node, State);
-handle_builtin(Message = #{type := move}, Node, State) when Node =:= node() ->
-    %% its convenient to be able to push a node to make a motion
-    erloom_electorate:motion(Message, State);
-handle_builtin(Message = #{type := task}, Node, State) when Node =:= node() ->
+handle_builtin(Message = #{type := ratify}, Node, State) ->
+    erloom_electorate:handle_ratify(Message, Node, State);
+
+handle_builtin(Message = #{type := task}, Node, State) ->
     %% task messages are for the surety to either retry or complete a task
     %% tasks run per node, transferring control is outside the scope
-    erloom_surety:handle_task(Message, State);
+    erloom_surety:handle_task(Message, Node, State);
+
 handle_builtin(#{type := lookup, path := Path, kind := chain}, _Node, State) ->
     State#{response => element(1, erloom_chain:lookup(State, Path))};
 handle_builtin(#{type := lookup, path := Path}, _Node, State) ->
     State#{response => util:lookup(State, Path)};
 handle_builtin(#{type := modify, path := Path, value := Value, kind := chain}, _Node, State) ->
-    erloom_chain:modify(State, Path, {Value, after_locus(State)});
+    State1 = State#{former => erloom_chain:lookup(State, Path)},
+    erloom_chain:modify(State1, Path, {Value, after_locus(State1)});
 handle_builtin(#{type := modify, path := Path, value := Value}, _Node, State) ->
-    util:modify(State, Path, Value);
+    State1 = State#{former => util:lookup(State, Path)},
+    util:modify(State1, Path, Value);
 handle_builtin(#{type := remove, path := Path}, _Node, State) ->
-    util:remove(State, Path);
+    State1 = State#{former => util:lookup(State, Path)},
+    util:remove(State1, Path);
+
 handle_builtin(_Message, _Node, State) ->
     State.
 
@@ -418,7 +452,7 @@ handle_message(Message, Node, IsNew, State = #{spec := Spec}) ->
     %% called to transform state for every message on every node
     %% happens 'at least once', should be externally idempotent
     %% for 'at most once', check if is new
-    State1 = cancel_yarn(Message, State),
+    State1 = cancel_builtin(Message, Node, State),
     State2 = handle_builtin(Message, Node, State1),
     Respond = fun () -> maybe_reply(State2) end,
     callback(Spec, {handle_message, 4}, [Message, Node, IsNew, State2], Respond).
@@ -428,6 +462,12 @@ vote_on_motion(Motion, Mover, State = #{spec := Spec}) ->
 
 motion_decided(Motion, Mover, Decision, State = #{spec := Spec}) ->
     callback(Spec, {motion_decided, 4}, [Motion, Mover, Decision, State], State).
+
+task_completed(Message = #{name := config}, Node, Result, State = #{spec := Spec}) ->
+    State1 = erloom_electorate:handle_task(Message, Node, Result, State),
+    callback(Spec, {task_completed, 4}, [Message, Node, Result, State1], State1);
+task_completed(Message, Node, Result, State = #{spec := Spec}) ->
+    callback(Spec, {task_completed, 4}, [Message, Node, Result, State], State).
 
 handle_info(Info, State = #{spec := Spec}) ->
     callback(Spec, {handle_info, 2}, [Info, State], State).
@@ -473,35 +513,58 @@ change_peers({_, []}, State) ->
 %%  3. Preventing the duplicate generation of new information
 
 create_yarn(Message = #{yarn := Yarn}, State) ->
-    stitch_yarn(Yarn, Message, defer_reply(Yarn, State));
+    %% create implies that we defer replies
+    stitch_yarn(Message, defer_reply(Yarn, State));
 create_yarn(Message, State) ->
     %% by default the name of the yarn is based on the current locus
+    %% also add minimal deps on current message
     %% NB: don't rely on the default name if creating multiple yarns
-    create_yarn(Message#{yarn => after_locus(State)}, State).
+    create_yarn(min_deps(Message#{yarn => after_locus(State)}, State), State).
 
-stitch_yarn(#{yarn := Yarn}, Message, State) ->
-    stitch_yarn(Yarn, Message, State);
-stitch_yarn(Yarn, Message, State = #{emits := Emits}) ->
-    %% only one message pending per yarn at a time
-    State#{emits => util:set(Emits, {node(), Yarn}, Message#{yarn => Yarn})}.
+stitch_yarn(Message = #{yarn := Yarn}, State) ->
+    %% add to emits: only one message pending per yarn (on node) at a time
+    %% if the yarn is specified, assume deps are too
+    util:modify(State, [emits, {node(), Yarn}], Message, []);
+stitch_yarn(Message, State = #{message := #{yarn := Yarn}}) ->
+    %% by default thread with the yarn of the current message
+    %% also add minimal deps on current message
+    stitch_yarn(min_deps(Message#{yarn => Yarn}, State), State).
 
-suture_yarn(Yarned, Message, State = #{point := Point}) ->
+suture_yarn(Message = #{yarn := _}, State) ->
     %% emit a message that depends on the entire current context
-    %% this is the strongest set of deps we can possibly have here
-    %% NB: reserve the right to treat builtin types (i.e. motion) differently
-    %%     e.g. only needs to depend on ratifying votes instead of full point
-    Deps = erloom:edge_hull(Point, after_locus(State)),
-    stitch_yarn(Yarned, Message#{deps => Deps}, State).
+    stitch_yarn(max_deps(Message, State), State);
+suture_yarn(Message, State = #{message := #{yarn := Yarn}}) ->
+    %% by default thread with the yarn of the current message
+    suture_yarn(Message#{yarn => Yarn}, State).
 
-cancel_yarn(#{yarn := Yarn}, State = #{emits := Emits}) ->
-    State#{emits => util:delete(Emits, {node(), Yarn})};
-cancel_yarn(_, State) ->
-    State.
+%% Tasks have similar "defer until tip" semantics as emit messages
+%% however processes must be restored on wake, making them more complicated
 
-create_task(Name, Task, State) ->
-    %% tasks have similar "defer until tip" semantics as emit messages
-    %% however processes must be restored on wake, making them more complicated
-    erloom_surety:task(Name, Task, State).
+create_task(Base = #{name := _}, Node, Task, State) ->
+    erloom_surety:task(min_deps(Base, State), Node, Task, State);
+create_task(Name, Node, Task, State) ->
+    create_task(#{name => Name}, Node, Task, State).
+
+stitch_task(Base = #{name := _}, Node, Task, State) ->
+    %% thread the task messages with a contextual yarn
+    %% if its a base message, assume deps are set already
+    case util:lookup(State, [message, yarn]) of
+        undefined ->
+            %% if there's no yarn, make one
+            create_task(Base#{yarn => after_locus(State)}, Node, Task, State);
+        Yarn ->
+            %% use the current yarn
+            create_task(Base#{yarn => Yarn}, Node, Task, State)
+    end;
+stitch_task(Name, Node, Task, State) ->
+    stitch_task(min_deps(#{name => Name}, State), Node, Task, State).
+
+suture_task(Base = #{name := _}, Node, Task, State) ->
+    %% task messages will depend on the entire current context, and be threaded
+    %% useful if trigger is not just the current message but a set of messages
+    stitch_task(max_deps(Base, State), Node, Task, State);
+suture_task(Name, Node, Task, State) ->
+    suture_task(#{name => Name}, Node, Task, State).
 
 make_motion(Motion, State) ->
     erloom_electorate:motion(Motion, State).

@@ -62,7 +62,7 @@ point_to_front(Node, State) ->
     util:modify(State, [point, Node], util:lookup(State, [front, Node])).
 
 replay_message(Message, Node, State) ->
-    loom:handle_message(Message, Node, false, State).
+    loom:handle_message(Message, Node, false, State#{message => Message}).
 
 replay_logs(State = #{front := Front}) ->
     try
@@ -95,7 +95,7 @@ wait_for({W, T}, N, Tip, Start, State = #{peers := Peers}) when N < W ->
     %% give the nodes a chance to reply that they've synced up to our tip
     receive
         {sync_logs, #{from := {FromNode, _}, front := Edge}} ->
-            case {util:get(Edge, node()), util:has(Peers, [FromNode])} of
+            case {util:get(Edge, node()), util:has(Peers, FromNode)} of
                 {Mark, IsPeer} when Mark < Tip orelse not IsPeer ->
                     wait_for({W, T}, N, Tip, Start, State);
                 _ ->

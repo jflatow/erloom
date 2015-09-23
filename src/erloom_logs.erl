@@ -146,11 +146,11 @@ range(Range, StateOrHome) ->
 replay(Fun, [Target|Stack], State = #{point := Point, front := Front}) ->
     Replay =
         fun (Message, Node, S) ->
-                case loom:unmet_deps(Message, S) of
+                case loom:unmet_needs(Message, S) of
                     nil ->
                         Fun(Message, Node, S);
-                    Deps ->
-                        replay(Fun, [Deps, Target], S)
+                    Needs ->
+                        replay(Fun, [Needs, Target], S)
                 end
         end,
     case erloom:edge_delta(Target, Point) of

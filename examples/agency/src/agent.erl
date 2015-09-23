@@ -45,7 +45,7 @@ handle_message(#{type := start}, Node, true, State) ->
 handle_message(#{type := stop}, Node, true, State) ->
     io:format("~p stopped~n", [Node]),
     loom:maybe_reply(State);
-handle_message(#{type := task, name := Name, done := _}, Node, true, State) ->
+handle_message(#{type := task, name := Name, kind := done}, Node, true, State) ->
     io:format("~p completed task ~p~n", [Node, Name]),
     loom:maybe_reply(State);
 handle_message(#{write := _}, _, true, State = #{wrote := Wrote}) ->
@@ -57,17 +57,17 @@ handle_message(_, _, false, State) ->
     State.
 
 vote_on_motion(_Motion, Mover, State) ->
-    io:format("~p vote on ~p from ~p ~n", [node(), loom:after_locus(State), Mover]),
+    io:format("~p vote on ~p from ~p ~n", [node(), erloom:locus_node(State), Mover]),
     {{yea, ok}, State}.
 
-motion_decided(#{kind := chain, path := xyz} = Motion, Mover, {true, _}, State) when Mover =:= node() ->
+motion_decided(#{kind := chain, path := xyz}, Mover, {true, _}, State) when Mover =:= node() ->
     GenVal = base64url:encode(crypto:rand_bytes(8)),
     Modify = #{type => modify, kind => chain, path => xyz, value => GenVal},
-    State1 = loom:suture_yarn(Motion, Modify, State),
-    loom:maybe_reply(Motion, [Mover, 'did pass chain'], State1);
-motion_decided(#{yarn := Yarn} = Motion, Mover, Decision, State) ->
+    State1 = loom:suture_yarn(Modify, State),
+    loom:maybe_reply([Mover, 'did pass chain'], State1);
+motion_decided(#{yarn := Yarn}, Mover, Decision, State) ->
     io:format("~p decided ~p for ~p from ~p~n", [node(), Decision, Yarn, Mover]),
-    loom:maybe_reply(Motion, Decision, State).
+    loom:maybe_reply(Decision, State).
 
 handle_idle(State) ->
     io:format("idling~n"),

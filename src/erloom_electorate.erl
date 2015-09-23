@@ -1,24 +1,26 @@
 -module(erloom_electorate).
 
--export([create/2,
+-export([create/3,
          motion/2,
          tether/2,
-         affirm_config/3,
          handle_motion/3,
-         handle_ballot/3]).
+         handle_ballot/3,
+         handle_ratify/3,
+         handle_ctrl/3,
+         handle_task/4]).
 
-create(_, State = #{elect := _}) ->
+create(_, _, State = #{elect := _}) ->
     State; %% electorate already exists
-create(Electors, State) ->
-    Edge = loom:after_locus(State),
-    Info = {[], #{kind => conf, conf => {set, Electors}}, {ratified, undefined}},
+create(Electors, Node, State = #{locus := Root}) ->
+    Change = {set, Electors},
     State1 = State#{elect => #{
-                      root => Edge,
-                      known => Edge,
-                      current => Edge,
-                      Edge => Info
+                      root => Root,
+                      known => Root,
+                      current => Root,
+                      pending => #{},
+                      Root => {[], #{kind => conf, value => Change}, decided}
                      }},
-    update_conf_peers(Edge, Info, State1).
+    config(Root, Change, Node, true, State1).
 
 motion(Motion = #{fiat := _}, State) ->
     %% fiat is forced, must depend on a known conf, or it might not take effect
@@ -28,14 +30,14 @@ motion(Motion = #{fiat := _}, State) ->
     %%  fiat decisions are made by the issuer, its up to them to know what they are doing
     Motion1 = Motion#{
                 type => motion,
-                deps => util:lookup(State, [elect, known])
+                refs => util:lookup(State, [elect, known])
                },
     loom:create_yarn(Motion1, State);
 motion(Motion, State) ->
     %% not a fiat, voting predicated on currently believed conf
     Motion1 = Motion#{
                 type => motion,
-                deps => util:lookup(State, [elect, current])
+                refs => util:lookup(State, [elect, current])
                },
     {Motion2, State1} =
         case util:get(Motion1, vote) of
@@ -54,29 +56,31 @@ tether(Change = #{path := Path}, State) ->
                },
     motion(Change1, State).
 
+change_list({add, Items}, List) ->
+    Items ++ List;
+change_list({remove, Items}, List) ->
+    List -- Items;
+change_list({set, Items}, _) ->
+    Items.
+
 is_descendant(Id, Id, _Elect) ->
     true;
 is_descendant(Id, OId, Elect) ->
     case util:get(Elect, Id) of
-        {_, #{deps := ParentId}, _} ->
+        {_, #{refs := ParentId}, _} ->
             is_descendant(ParentId, OId, Elect);
         _->
             false
     end.
 
-get_parent(#{deps := ParentId}, #{elect := Elect}) ->
-    util:get(Elect, ParentId);
-get_parent(_Motion, _State) ->
-    undefined.
-
-get_ancestors(#{deps := ParentId}, #{elect := Elect}) ->
+get_ancestors(#{refs := ParentId}, #{elect := Elect}) ->
     get_ancestors(ParentId, Elect, []);
 get_ancestors(_Motion, _State) ->
     [].
 
 get_ancestors(MotionId, Elect, Acc) ->
     case util:get(Elect, MotionId) of
-        MotionInfo = {_, #{deps := ParentId}, _} ->
+        MotionInfo = {_, #{refs := ParentId}, _} ->
             get_ancestors(ParentId, Elect, [{MotionId, MotionInfo}|Acc]);
         MotionInfo ->
             [{MotionId, MotionInfo}|Acc]
@@ -98,7 +102,7 @@ get_siblings(MotionId, State = #{elect := Elect}) ->
             get_siblings(MotionId, MotionInfo, State)
     end.
 
-get_siblings(MotionId, {_, #{deps := Parent}, _}, State) ->
+get_siblings(MotionId, {_, #{refs := Parent}, _}, State) ->
     [C || C = {K, _} <- get_children(Parent, State), K =/= MotionId];
 get_siblings(_, _, _) ->
     [].
@@ -106,26 +110,34 @@ get_siblings(_, _, _) ->
 get_electorate(Motion, State) ->
     %% walk from root conf to confid and calculate the voting group
     %% NB: not optimized for lots of changes to conf, could cache
-    lists:foldl(fun ({_, {_, #{conf := {add, Electors}}, _}}, Acc) ->
-                        Electors ++ Acc;
-                    ({_, {_, #{conf := {remove, Electors}}, _}}, Acc) ->
-                        Acc -- Electors;
-                    ({_, {_, #{conf := {set, Electors}}, _}}, _) ->
-                        Electors
+    lists:foldl(fun ({_, {_, #{value := Change}, _}}, Acc) ->
+                        change_list(Change, Acc)
                 end, [], get_ancestors(Motion, State)).
 
-get_motion_id(#{type := motion}, State) ->
-    %% we are processing the motion, the id is the after edge
-    loom:after_locus(State);
-get_motion_id(#{type := ballot, deps := MotionId}, _State) ->
-    %% we are processing the ballot, the id is the deps edge
+get_electorate_diff(MotionId, Change, State) ->
+    Old = get_electorate(get_motion(MotionId, State), State),
+    New = change_list(Change, Old),
+    {New -- Old, Old -- New}.
+
+get_motion(MotionId, State) ->
+    case util:lookup(State, [elect, MotionId]) of
+        undefined ->
+            undefined;
+        {_, Motion, _} ->
+            Motion
+    end.
+
+get_motion_id(#{type := motion}, #{locus := Locus}) ->
+    %% we are processing the motion, the id is the locus
+    Locus;
+get_motion_id(#{type := ballot, refs := MotionId}, _State) ->
+    %% we are processing the ballot, the id is the ref
     MotionId.
 
 get_mover(MotionId) ->
-    %% somewhat fragile, but the id currently contains the node that made the motion
-    hd(maps:keys(MotionId)).
+    erloom:locus_node(MotionId).
 
-delete_motion(MotionId, #{deps := ParentId}, State = #{elect := Elect}) ->
+delete_motion(MotionId, #{refs := ParentId}, State = #{elect := Elect}) ->
     %% remove the motion from the parent, and delete the motion
     Elect1 =
         case util:get(Elect, ParentId) of
@@ -136,33 +148,22 @@ delete_motion(MotionId, #{deps := ParentId}, State = #{elect := Elect}) ->
         end,
     util:set(State, elect, util:remove(Elect1, MotionId)).
 
-vote(MotionId, Motion, Vote, State) ->
+vote(MotionId, _Motion, Vote, State) ->
     Ballot = #{
-      deps => MotionId,
+      refs => MotionId,
       type => ballot,
       vote => Vote
      },
-    loom:stitch_yarn(Motion, Ballot, State).
+    loom:stitch_yarn(Ballot, State).
 
-affirm_config(#{type := Type, deps := ConfId}, Node, State) ->
-    %% when a conf changes the peer group, we keep a list of nodes that need start / stop
-    %% when we see that a node references the conf, with a start or stop, we remove it from the list
-    case util:lookup(State, [elect, ConfId]) of
-        {Kids, Conf, {ratified, {Start, Stop}}} ->
-            Pending =
-                case Type of
-                    start ->
-                        {lists:delete(Node, Start), Stop};
-                    stop ->
-                        {Start, lists:delete(Node, Stop)}
-                end,
-            util:modify(State, [elect, ConfId], {Kids, Conf, {ratified, Pending}});
-        _ ->
-            %% if the conf somehow disappears (maybe a fiat?), just do nothing
-            State
-    end.
+ratify(MotionId, _Motion, State) ->
+    Ratification = #{
+      refs => MotionId,
+      type => ratify
+     },
+    loom:suture_yarn(Ratification, State).
 
-handle_motion(Motion = #{deps := ConfId}, Mover, State) ->
+handle_motion(Motion = #{refs := ConfId}, Mover, State) ->
     MotionId = get_motion_id(Motion, State),
     State1 = maybe_save_motion(Motion, MotionId, State),
     case util:lookup(State1, [elect, MotionId]) of
@@ -214,7 +215,39 @@ handle_ballot(Ballot, Node, State) ->
     State1 = maybe_save_ballot(Ballot, MotionId, Node, State),
     adjudicate(Ballot, MotionId, State1).
 
-maybe_save_motion(Motion = #{deps := ConfId}, MotionId, State = #{elect := Elect}) ->
+handle_ratify(#{refs := MotionId}, Node, State) ->
+    case get_motion(MotionId, State) of
+        undefined ->
+            %% most motions are deleted after they are decided anyway
+            %% nothing generic to do if its not a conf (and / or deleted)
+            State;
+        #{kind := conf, value := Change} ->
+            %% conf change has been ratified, start taking action
+            config(MotionId, Change, Node, false, State)
+    end.
+
+handle_ctrl(#{type := Type, refs := ConfId}, Node, State) ->
+    %% we keep a list of nodes that need start / stop for each config task
+    %% when we see a node successfully started / stopped, we update the list
+    util:replace(State, [elect, pending, ConfId],
+                 fun ({Start, Stop}) when Type =:= start ->
+                         {lists:delete(Node, Start), Stop};
+                     ({Start, Stop}) when Type =:= stop ->
+                         {Start, lists:delete(Node, Stop)};
+                     (Other) ->
+                         Other
+                 end).
+
+handle_task(#{name := config}, Node, ConfId, State) ->
+    case get_motion(ConfId, State) of
+        undefined ->
+            %% if the conf somehow disappears (maybe due to a fiat?), just do nothing
+            State;
+        #{kind := conf, value := Change} ->
+            done_config(ConfId, Change, Node, State)
+    end.
+
+maybe_save_motion(Motion = #{refs := ConfId}, MotionId, State = #{elect := Elect}) ->
     case util:get(Elect, ConfId) of
         undefined ->
             %% the conf has been forgotten, it must be an impossible electorate
@@ -232,8 +265,8 @@ maybe_save_ballot(#{vote := Vote}, MotionId, Node, State = #{elect := Elect}) ->
         undefined ->
             %% the motion has been forgotten, it must have already been decided
             State;
-        {_, _, {ratified, _}} ->
-            %% the motion is already ratified (must be a conf change, as its still here)
+        {_, _, decided} ->
+            %% the motion is already decided (must be a conf change, as its still here)
             State;
         {Kids, Motion, Votes} when is_map(Votes) ->
             %% the motion is open, register the vote
@@ -263,10 +296,10 @@ adjudicate(Ballot, MotionId, State = #{elect := Elect}) ->
         undefined ->
             %% the motion has already been decided
             State;
-        MotionInfo = {_, #{deps := ConfId}, _} ->
+        MotionInfo = {_, #{refs := ConfId}, _} ->
             %% the motion is still a possibility (it exists, so its open)
             case util:get(Elect, ConfId) of
-                {_, _, {ratified, _}} ->
+                {_, _, decided} ->
                     %% the electorate is known to be valid
                     case util:get(Ballot, fiat) of
                         undefined ->
@@ -282,7 +315,7 @@ adjudicate(Ballot, MotionId, State = #{elect := Elect}) ->
             end
     end.
 
-reckon_elections(_, {_, _, {ratified, _}}, State) ->
+reckon_elections(_, {_, _, decided}, State) ->
     %% do nothing if the decision is already made
     State;
 reckon_elections(MotionId, MotionInfo, State) ->
@@ -301,14 +334,11 @@ reflect_decision(MotionId, {Kids, Motion, _}, Decision = {true, _}, State = #{el
     State1 =
         case Motion of
             #{kind := conf} ->
-                %% the motion was a conf change, update the last known conf and ratify it
+                %% the motion was a conf change, update the last known conf and mark decided
                 %% if the current belief is not a descendant of known, change it
                 %% any conf siblings must be killed, there can only be one
-                %% the peer group should be updated to support the electorate
-                %% also, we must emit a message with deps on the ratifying votes (if any)
-                %% this keeps the guarantee that subsets of our log determine the peer group for writing
-                %% our Point is at least past the ratifying votes, so that will do
-                MotionInfo = {Kids, Motion, {ratified, undefined}},
+                %% finally, if we are the mover, ratify the motion
+                MotionInfo = {Kids, Motion, decided},
                 Elect1 = Elect#{known => MotionId, MotionId => MotionInfo},
                 Elect2 =
                     case is_descendant(util:get(Elect1, current), MotionId, Elect1) of
@@ -317,10 +347,12 @@ reflect_decision(MotionId, {Kids, Motion, _}, Decision = {true, _}, State = #{el
                         false ->
                             Elect1#{current => MotionId}
                     end,
-                S1 = State#{elect => Elect2},
-                S2 = murder_conf_siblings(MotionId, S1),
-                S3 = update_conf_peers(MotionId, MotionInfo, S2),
-                loom:suture_yarn(Motion, #{type => barrier, kind => conf}, S3);
+                case murder_conf_siblings(MotionId, State#{elect => Elect2}) of
+                    S when Mover =:= node() ->
+                        ratify(MotionId, Motion, S);
+                    S ->
+                        S
+                end;
             _ ->
                 %% the motion was not a conf change, no need to keep it around
                 delete_motion(MotionId, Motion, State)
@@ -388,9 +420,9 @@ motion_decided(Motion = #{retry := true}, Mover, Decision = {false, _}, State) w
     State1 =
         case util:get(Motion, limit) of
             undefined ->
-                loom:suture_yarn(Motion, Motion#{type => move}, State);
+                loom:suture_yarn(Motion#{type => move}, State);
             N when is_integer(N), N > 0 ->
-                loom:suture_yarn(Motion, Motion#{type => move, limit => N - 1}, State);
+                loom:suture_yarn(Motion#{type => move, limit => N - 1}, State);
             _ ->
                 State
         end,
@@ -424,62 +456,73 @@ murder_conf_siblings(ConfId, State) ->
                         S
                 end, State, get_siblings(ConfId, State)).
 
-update_conf_peers(ConfId, {Kids, Conf = #{conf := Change}, {ratified, undefined}}, State) ->
-    %% change the peer group, and start / stop nodes that are added / removed
+config(ConfId, Change, Node, IsRoot, State) ->
+    %% we *add* peers when the conf is ratified (i.e. before nodes are started)
+    %% otherwise nodes won't get the deps they need in order to start
+    %% store pending under locus so we can keep track of what's been started / stopped
+    %% create the config task
+    %%   only the node that makes the motion to change will try to start / stop the nodes
+    %%   this is a single point of failure for changing the group (and all tasks) currently
+    %%   in theory other nodes could try to take over a task if they think something is wrong
+    %%   on the other hand all nodes are eventually supposed to recover, so tasks can't fail
+    %%   the tasks are run under a common name, ensuring a total order
     %% initiate a sync right away to cut down on chance that deps will be missing
-    %% NB: implementation assumes fully connected peer group and a single electorate
-    %%     its possible, but complicated, to support multiple electorates and asymmetric peers
-    State1 = loom:change_peers(Change, State),
-    Old = maps:keys(util:get(State, peers)),
-    New = maps:keys(util:get(State1, peers)),
-    State2 = util:modify(State1, [elect, ConfId], {Kids, Conf, {ratified, {New -- Old, Old -- New}}}),
+    Pending = {Add, _} = get_electorate_diff(ConfId, Change, State),
+    State1 = util:modify(State, [elect, pending, ConfId], Pending),
+    State2 = loom:change_peers({add, Add}, State1),
     State3 = erloom_sync:maybe_push(State2),
-    case get_mover(ConfId) of
-        Node when Node =:= node() ->
-            %% only the node that makes the motion to change will try to start / stop the nodes
-            %% this is a single point of failure for changing the group, currently
-            %% in theory other nodes could try to exert control if they think something is wrong
-            loom:create_task({conf, ConfId}, {fun control_conf_peers/2, ConfId}, State3);
+    State4 = loom:suture_task(config, Node, {fun do_config/2, ConfId}, State3),
+    case Node of
+        N when N =:= node() ->
+            %% its ours
+            State4;
+        _ when Add =:= [] ->
+            %% not ours, no need to fence when nothing was added
+            State4;
+        _ when IsRoot ->
+            %% not ours, no need to fence the root, everyone must have it at least when they start
+            State4;
         _ ->
-            State3
+            %% not ours, just emit a fence marking the peer change
+            loom:stitch_yarn(#{type => fence, kind => conf}, State4)
     end.
 
-control_conf_peers(ConfId, State = #{spec := Spec}) ->
+do_config(ConfId, State = #{spec := Spec}) ->
+    %% start / stop nodes that are added / removed
     %% the first try may reach the targets before the deps and fail
     %% its fine, we'll just retry, these messages are relatively uncommon anyway
-    case ready_to_control(ConfId, State) of
-        {true, Pending} ->
-            case Pending of
+    case util:lookup(State, [elect, pending, ConfId]) of
+        {[], []} ->
+            {done, ConfId};
+        {Start, Stop} ->
+            %% give the sync a little bit of a chance to work by waiting a sec
+            %% optimize by using responses in addition to the sync channel
+            receive after 1000 -> ok end,
+            A = loom:multicall(Start, [Spec, #{refs => ConfId, type => start}]),
+            B = loom:multicall(Stop, [Spec, #{refs => ConfId, type => stop}]),
+            case {Start -- util:keys(A, ok), Stop -- util:keys(B, ok)} of
                 {[], []} ->
-                    {done, ok};
-                {Start, Stop} ->
-                    %% give the sync a little bit of a chance to work by waiting a sec
-                    receive after 1000 -> ok end,
-                    _ = loom:multicall(Start, [Spec, #{deps => ConfId, type => start}]),
-                    _ = loom:multicall(Stop, [Spec, #{deps => ConfId, type => stop}]),
-                    {retry, {15, seconds}}
-            end;
-        {false, not_ready} ->
-            {retry, {60, seconds}};
-        {false, Reason} ->
-            {error, Reason}
+                    {done, ConfId};
+                {_, _} ->
+                    {retry, {10, seconds}}
+            end
     end.
 
-ready_to_control(ConfId, State) ->
-    %% the parent change must have no more pending changes before we are ready to exert control
-    %% this guarantees *all* start / stops happen in order
-    case util:lookup(State, [elect, ConfId]) of
-        {_, Conf = #{deps := _}, {ratified, Pending = {_, _}}} ->
-            case get_parent(Conf, State) of
-                {_, _, {ratified, {[], []}}} ->
-                    {true, Pending};
-                {_, _, {ratified, {_, _}}} ->
-                    {false, not_ready};
-                _ ->
-                    {false, bad_parent}
-            end;
-        {_, _Seed, {ratified, Pending = {_, _}}} ->
-            {true, Pending};
+done_config(ConfId, Change, Node, State) ->
+    %% we *remove* peers after the task completes (i.e. after nodes are stopped)
+    %% otherwise its possible a node being stopped won't receive its start before being removed
+    %% in that case it will be impossible to stop as it will reject everything except the start
+    {_, Remove} = get_electorate_diff(ConfId, Change, State),
+    State1 = util:remove(State, [elect, pending, ConfId]),
+    State2 = loom:change_peers({remove, Remove}, State1),
+    case Node of
+        N when N =:= node() ->
+            %% its ours, we're done
+            State2;
+        _ when Remove =:= [] ->
+            %% not ours, no need to fence when nothing was removed
+            State2;
         _ ->
-            {false, bad_conf}
+            %% not ours, just emit a fence marking the peer change
+            loom:stitch_yarn(#{type => fence, kind => conf}, State2)
     end.

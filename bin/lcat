@@ -14,11 +14,15 @@ lcat(Home) ->
     erloom_logs:fold(
       fun (Message, {{Node, IId}, {_, After}},  _) ->
               Deps = util:get(Message, deps, #{}),
+              Refs = util:get(Message, refs, []),
               Type = util:get(Message, type, "-"),
               Kind = util:get(Message, kind, "-"),
               Yarn = util:get(Message, yarn, "-"),
               Line = line(maps:without([deps, type, kind, yarn], Message)),
-              io:format("~s ~s ~p\t~B\t~-8s\t~-8s\t~-48s\t~s~n", [Node, IId, After, map_size(Deps), Type, Kind, spin(Yarn), Line])
+              io:format("~s ~s ~p\t~B ~B\t~-8s\t~-8s\t~-48s\t~s~n",
+                        [Node, IId, After,
+                         map_size(Deps), len(Refs),
+                         Type, Kind, spin(Yarn), Line])
       end, nil, Home).
 
 line(Message) ->
@@ -36,3 +40,8 @@ spin(Yarn) when is_map(Yarn) ->
                 end, [], Yarn), "/");
 spin(Yarn) ->
     Yarn.
+
+len(List) when is_list(List) ->
+    length(List);
+len(_) ->
+    1.

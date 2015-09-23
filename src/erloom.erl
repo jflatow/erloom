@@ -3,31 +3,36 @@
 -export_type([logid/0,
               mark/0,
               which/0,
-              locus/0,
               range/0,
               delta/0,
               edge/0,
               edges/0,
               entries/0,
+              locus/0,
+              loci/0,
               logs/0]).
 
 -type logid() :: binary().
 -type mark() :: {logid(), log:mark()}.
 -type which() :: {node(), logid()}.
--type locus() :: {which(), log:range()}.
 -type range() :: {mark() | undefined, mark()}.
 -type delta() :: #{node() => range()}.
 -type edge() :: #{node() => mark()}.
 -type edges() :: #{node() => edge()}.
 -type entries() :: #{which() => [log:entry()]}.
+-type locus() :: {which(), log:range()}.
+-type loci() :: locus() | [locus()].
 -type logs() :: #{which() => log:log()}.
 
--spec locus_before(locus()) -> edge().
--spec locus_after(locus()) -> edge().
 -spec delta_lower(delta()) -> edge().
 -spec delta_upper(delta()) -> edge().
 -spec edge_delta(edge(), edge()) -> delta().
 -spec edge_hull(edge(), edge()) -> edge().
+-spec locus_node(locus()) -> node().
+-spec locus_before(locus()) -> edge().
+-spec locus_after(locus()) -> edge().
+-spec loci_before(loci()) -> edge().
+-spec loci_after(loci()) -> edge().
 
 -behavior(application).
 -export([start/0, stop/0]).
@@ -40,13 +45,16 @@
 -define(Child(Mod, Args, Type), {Mod, {Mod, start, Args}, permanent, 5000, Type, [Mod]}).
 -define(Children, [?Child(erloom_registry, [], worker)]).
 
--export([locus_before/1,
-         locus_after/1,
-         delta_lower/1,
+-export([delta_lower/1,
          delta_upper/1,
          edge_delta/2,
          edge_hull/2,
-         edges_max/2]).
+         edges_max/2,
+         locus_node/1,
+         locus_before/1,
+         locus_after/1,
+         loci_before/1,
+         loci_after/1]).
 
 %% command-line
 
@@ -79,12 +87,6 @@ init([]) ->
     {ok, {{one_for_one, ?MaxRestarts, ?MaxRestartWindow}, ?Children}}.
 
 %% erloom
-
-locus_before({{Node, IId}, {Before, _}}) ->
-    #{Node => {IId, Before}}.
-
-locus_after({{Node, IId}, {_, After}}) ->
-    #{Node => {IId, After}}.
 
 delta_lower(D) ->
     util:map(D, fun ({L, _}) -> L end).
@@ -121,3 +123,22 @@ edges_max(OfNode, Edges) ->
                               {N, M}
                       end
               end, {undefined, undefined}, Edges).
+
+locus_node({{Node, _}, _}) ->
+    Node.
+
+locus_before({{Node, IId}, {Before, _}}) ->
+    #{Node => {IId, Before}}.
+
+locus_after({{Node, IId}, {_, After}}) ->
+    #{Node => {IId, After}}.
+
+loci_before(Loci) when is_list(Loci) ->
+    lists:foldl(fun (L, A) -> edge_hull(locus_before(L), A) end, #{}, Loci);
+loci_before(Locus) ->
+    locus_before(Locus).
+
+loci_after(Loci) when is_list(Loci) ->
+    lists:foldl(fun (L, A) -> edge_hull(locus_after(L), A) end, #{}, Loci);
+loci_after(Locus) ->
+    locus_after(Locus).
