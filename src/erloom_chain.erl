@@ -6,7 +6,7 @@
 
 %% public api
 -export([lock/2,
-         unlock/2,
+         unlock/3,
          value/2,
          version/2]).
 
@@ -30,7 +30,7 @@ lock(State, Path) ->
             State
     end.
 
-unlock(State, Path) ->
+unlock(State, Path, Version) ->
     case lookup(State, Path) of
         {_, _} ->
             State;

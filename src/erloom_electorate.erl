@@ -406,7 +406,7 @@ resolve_motion(MotionId, #{kind := chain, path := Path} = Motion, Mover, Decisio
                 erloom_chain:modify(State, Path, {Value, MotionId});
             _ ->
                 %% failed to chain: unlock
-                erloom_chain:unlock(State, Path)
+                erloom_chain:unlock(State, Path, MotionId)
         end,
     motion_decided(Motion, Mover, Decision, State1);
 resolve_motion(_MotionId, Motion, Mover, Decision, State) ->

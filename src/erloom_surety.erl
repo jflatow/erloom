@@ -49,13 +49,16 @@ handle_task(#{kind := fail} = Message, Node, State) ->
 complete_task(#{name := Name, value := Result} = Message, Node, State) ->
     State1 =
         case util:lookup(State, [tasks, Name]) of
-            {_Pid, Stack} ->
+            {Pid, Stack} ->
                 %% remove the first task with name / node
                 case lists:keydelete(Node, 1, Stack) of
                     [] ->
                         %% if stack is empty, delete the whole thing
                         util:remove(State, [tasks, Name]);
-                    Stack1 ->
+                    Stack1 when Pid =:= undefined ->
+                        %% if we haven't started spawning yet, just remove
+                        util:modify(State, [tasks, Name], {Pid, Stack1});
+                    Stack1 when is_pid(Pid) ->
                         %% spawn the next task (maybe, if its ours)
                         Pid1 = spawn_task(Name, Stack1, State),
                         util:modify(State, [tasks, Name], {Pid1, Stack1})
