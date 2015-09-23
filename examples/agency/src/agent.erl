@@ -56,8 +56,8 @@ handle_message(Message, Node, true, State) ->
 handle_message(_, _, false, State) ->
     State.
 
-vote_on_motion(_Motion, Mover, State) ->
-    io:format("~p vote on ~p from ~p ~n", [node(), erloom:locus_node(State), Mover]),
+vote_on_motion(Motion, Mover, State) ->
+    io:format("~p vote on ~p from ~p ~n", [node(), Motion, Mover]),
     {{yea, ok}, State}.
 
 motion_decided(#{kind := chain, path := xyz}, Mover, {true, _}, State) when Mover =:= node() ->

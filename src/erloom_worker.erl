@@ -18,8 +18,7 @@ wait() ->
             State2 = write_through(Message, State1),
             State3 = loom:handle_message(Message, node(), true, State2),
             State4 = point_to_front(node(), State3),
-            State5 = clear_default(State4),
-            done(State5);
+            done(State4);
         {replay_logs, State} ->
             State1 = replay_logs(State),
             done(State1);
@@ -55,14 +54,12 @@ store_default(Message = #{yarn := Yarn}, undefined, State = #{reply := Replies})
 store_default(Message, Reply, State = #{reply := Replies}) ->
     State#{reply => Replies#{default => Reply}, message => Message, response => ok}.
 
-clear_default(State) ->
-    util:remove(State, [reply, default]).
-
 point_to_front(Node, State) ->
     util:modify(State, [point, Node], util:lookup(State, [front, Node])).
 
 replay_message(Message, Node, State) ->
-    loom:handle_message(Message, Node, false, State#{message => Message}).
+    State1 = store_default(Message, undefined, State),
+    loom:handle_message(Message, Node, false, State1).
 
 replay_logs(State = #{front := Front}) ->
     try

@@ -311,6 +311,8 @@ defer_reply(Name, State = #{reply := Replies}) ->
     case util:get(Replies, default) of
         undefined ->
             State;
+        Name ->
+            State;
         Reply ->
             State#{reply => Replies#{default => Name, Name => Reply}}
     end.
@@ -324,10 +326,10 @@ maybe_reply(Response, State) ->
 maybe_reply(Reply, Response, State) when is_function(Reply) ->
     Reply(Response),
     State;
-maybe_reply(Name, Response, State = #{reply := Replies}) ->
+maybe_reply(Name, Response, State) ->
     %% try and reply to the deferred reply by name
     %% delete reply, so it can only happen once
-    case util:get(Replies, Name) of
+    case util:lookup(State, [reply, Name]) of
         undefined ->
             State;
         Reply ->
