@@ -1,8 +1,17 @@
 #!/usr/bin/env escript
 %% -*- erlang -*-
 
+follow(Path) ->
+    case file:read_link_all(Path) of
+        {ok, Linked} ->
+            follow(filename:absname(Linked, filename:dirname(Path)));
+        {error, einval} ->
+            Path
+    end.
+
 add_paths() ->
-    RelPath = filename:dirname(filename:dirname(escript:script_name())),
+    Script = follow(escript:script_name()),
+    RelPath = filename:dirname(filename:dirname(Script)),
     code:add_paths([RelPath ++ "/ebin",
                     RelPath ++ "/deps/erlkit/ebin"]).
 
@@ -18,7 +27,7 @@ lcat(Home) ->
               Type = util:get(Message, type, "-"),
               Kind = util:get(Message, kind, "-"),
               Yarn = util:get(Message, yarn, "-"),
-              Line = line(maps:without([deps, type, kind, yarn], Message)),
+              Line = line(maps:without([deps, refs, type, kind, yarn], Message)),
               io:format("~s ~s ~p\t~B ~B\t~-8s\t~-8s\t~-48s\t~s~n",
                         [Node, IId, After,
                          map_size(Deps), len(Refs),

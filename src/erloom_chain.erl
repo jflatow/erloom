@@ -35,7 +35,9 @@ unlock(State, Path, Version) ->
         {_, _} ->
             State;
         {Value, Version, locked} ->
-            util:modify(State, Path, {Value, Version})
+            util:modify(State, Path, {Value, Version});
+        {_, _, locked} ->
+            State
     end.
 
 value(State, Path) ->

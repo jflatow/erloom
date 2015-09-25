@@ -32,7 +32,7 @@ motion(Motion = #{fiat := _}, State) ->
                 type => motion,
                 refs => util:lookup(State, [elect, known])
                },
-    loom:create_yarn(Motion1, State);
+    loom:stitch_yarn(Motion1, State);
 motion(Motion, State) ->
     %% not a fiat, voting predicated on currently believed conf
     Motion1 = Motion#{
@@ -47,7 +47,7 @@ motion(Motion, State) ->
             _ ->
                 {Motion1, State}
         end,
-    loom:create_yarn(Motion2, State1).
+    loom:stitch_yarn(Motion2, State1).
 
 tether(Change = #{path := Path}, State) ->
     Change1 = Change#{
@@ -403,10 +403,12 @@ resolve_motion(MotionId, #{kind := chain, path := Path} = Motion, Mover, Decisio
             {true, _} ->
                 %% passed a motion to chain: store value and bump version
                 Value = util:get(Motion, value),
-                erloom_chain:modify(State, Path, {Value, MotionId});
+                S1 = State#{response => {ok, Value}},
+                erloom_chain:modify(S1, Path, {Value, MotionId});
             _ ->
                 %% failed to chain: unlock
-                erloom_chain:unlock(State, Path, MotionId)
+                S1 = State#{response => {error, motion}},
+                erloom_chain:unlock(S1, Path, MotionId)
         end,
     motion_decided(Motion, Mover, Decision, State1);
 resolve_motion(_MotionId, Motion, Mover, Decision, State) ->

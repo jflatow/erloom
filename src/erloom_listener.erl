@@ -31,7 +31,7 @@ listen(catchup, State) ->
     %%  dont emit or start tasks as we may have already done it
     %% otherwise we might be waiting / recovering
     %%  its not safe to write to our log yet
-    replay_logs(State);
+    replay_logs(loom:init(State));
 
 listen(ready, State = #{opts := Opts, active := Active, tasks := Tasks}) ->
     %% syncing happens when we realize we are missing data
@@ -179,7 +179,7 @@ check_recovery(State = #{status := recovering, peers := Peers, front := Front, e
                       type => recover,
                       yarn => recover
                      },
-                    loom:create_yarn(Message, loom:waken(State));
+                    loom:stitch_yarn(Message, loom:waken(State));
                 false ->
                     State
             end

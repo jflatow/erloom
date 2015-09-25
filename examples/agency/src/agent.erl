@@ -34,7 +34,7 @@ handle_message(#{do := save}, _Node, true, State) ->
 handle_message(#{do := get_state}, _Node, true, State) ->
     loom:maybe_reply(State, State);
 handle_message(#{do := emit}, _Node, true, State) ->
-    loom:create_yarn(#{do => reply}, State);
+    loom:stitch_yarn(#{do => reply}, State);
 handle_message(#{do := reply}, _Node, true, State) ->
     loom:maybe_reply(got_it, State);
 handle_message(#{chain := {Path, Value}}, _Node, true, State) ->

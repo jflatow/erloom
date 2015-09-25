@@ -1,6 +1,7 @@
 -module(loom).
 
 -export_type([spec/0,
+              home/0,
               opts/0,
               message/0,
               reply/0,
@@ -11,8 +12,8 @@
               motion/0,
               ballot/0]).
 
--type path() :: iodata().
 -type spec() :: {atom(), term()}.
+-type home() :: iodata().
 -type opts() :: #{
             idle_elapsed => non_neg_integer(),
             idle_timeout => non_neg_integer() | infinity,
@@ -34,7 +35,7 @@
              active => boolean(),                             %% owned by worker
              status => awake | waking | waiting | recovering, %% owned by listener
              spec => spec(),
-             home => path(),
+             home => home(),
              opts => opts(),
              logs => erloom:logs(),
              ours => erloom:which(),
@@ -73,9 +74,10 @@
 }.
 
 -callback proc(spec()) -> pid().
--callback home(spec()) -> path().
+-callback home(spec()) -> home().
 -callback opts(spec()) -> opts().
 -callback keep(state()) -> state().
+-callback init(state()) -> state().
 -callback waken(state()) -> state().
 -callback verify_message(message(), state()) ->
     {ok, message(), state()} |
@@ -94,6 +96,7 @@
 -optional_callbacks([proc/1,
                      opts/1,
                      keep/1,
+                     init/1,
                      waken/1,
                      verify_message/2,
                      write_through/3,
@@ -105,7 +108,9 @@
                      handle_idle/1,
                      check_node/3]).
 
--export([send/2,
+-export([seed/1,
+         seed/2,
+         send/2,
          send/3,
          call/2,
          call/3,
@@ -121,8 +126,9 @@
          keep/1,
          save/1,
          load/1,
-         sleep/1,
+         init/1,
          waken/1,
+         sleep/1,
          start/2,
          stop/2,
          after_locus/1,
@@ -147,14 +153,22 @@
 
 -export([change_peers/2]).
 
--export([create_yarn/2,
-         stitch_yarn/2,
+-export([stitch_yarn/2,
          suture_yarn/2,
-         create_task/4,
          stitch_task/4,
          suture_task/4,
          make_motion/2,
          maybe_chain/2]).
+
+%% 'seed' (or equivalent) must be called before a loom can be used
+%% it is called only the first time the loom is *ever* used,
+%% assuming the message is persisted (write_through not overridden)
+
+seed(Spec) ->
+    seed(Spec, [node()]).
+
+seed(Spec, Nodes) ->
+    call(Spec, #{type => start, seed => Nodes}).
 
 %% 'send' is the main entry point for communicating with the loom
 %% returns the (local) pid for the loom which can be cached
@@ -273,10 +287,10 @@ load(State = #{home := _}) ->
 load(State = #{spec := Spec}) ->
     load(State#{home => home(Spec), opts => opts(Spec)}).
 
-sleep(State) ->
-    State1 = save(State),
-    erloom_logs:close(State1),
-    exit(sleep).
+init(State = #{spec := Spec}) ->
+    %% called on listener after we are loaded, but before we replay any messages
+    %% we were previously not loaded, give a chance to do early initialization
+    callback(Spec, {init, 1}, [State], State).
 
 waken(State = #{status := awake}) ->
     State;
@@ -285,6 +299,11 @@ waken(State = #{spec := Spec}) ->
     %% we were previously not awake, give a chance to liven the state
     State1 = erloom_surety:restart_tasks(State#{status => awake}),
     callback(Spec, {waken, 1}, [State1], State1).
+
+sleep(State) ->
+    State1 = save(State),
+    erloom_logs:close(State1),
+    exit(sleep).
 
 start(_, State = #{active := true}) ->
     State;
@@ -480,18 +499,28 @@ handle_idle(State = #{spec := Spec}) ->
 check_node(Node, Unanswered, State = #{spec := Spec}) ->
     callback(Spec, {check_node, 3}, [Node, Unanswered, State], State).
 
-callback({Mod, _}, {Fun, _}, Args) when is_atom(Mod) ->
-    erlang:apply(Mod, Fun, Args).
+callback(Mod, {Fun, _}, Args) when is_atom(Mod) ->
+    erlang:apply(Mod, Fun, Args);
+callback(Spec, {Fun, Arity}, Args) when is_tuple(Spec) ->
+    callback(element(1, Spec), {Fun, Arity}, Args).
 
-callback({Mod, _}, {Fun, Arity}, Args, Default) when is_atom(Mod) ->
+callback(Mod, {Fun, Arity}, Args, Default) when is_atom(Mod) ->
     case erlang:function_exported(Mod, Fun, Arity) of
         true ->
             erlang:apply(Mod, Fun, Args);
-        false when is_function(Default) ->
-            Default();
         false ->
-            Default
-    end.
+            case code:is_loaded(Mod) of
+                {file, _} when is_function(Default) ->
+                    Default();
+                {file, _} ->
+                    Default;
+                false ->
+                    {module, Mod} = code:ensure_loaded(Mod),
+                    callback(Mod, {Fun, Arity}, Args, Default)
+            end
+    end;
+callback(Spec, {Fun, Arity}, Args, Default) when is_tuple(Spec) ->
+    callback(element(1, Spec), {Fun, Arity}, Args, Default).
 
 change_peers({set, Nodes}, State) ->
     change_peers({add, Nodes}, State#{peers => #{}});
@@ -514,23 +543,21 @@ change_peers({_, []}, State) ->
 %%  2. Generating new information, and communicating it to the group
 %%  3. Preventing the duplicate generation of new information
 
-create_yarn(Message = #{yarn := Yarn}, State) ->
-    %% create implies that we defer replies
-    stitch_yarn(Message, defer_reply(Yarn, State));
-create_yarn(Message, State) ->
-    %% by default the name of the yarn is based on the current locus
-    %% also add minimal deps on current message
-    %% NB: don't rely on the default name if creating multiple yarns
-    create_yarn(min_deps(Message#{yarn => after_locus(State)}, State), State).
-
 stitch_yarn(Message = #{yarn := Yarn}, State) ->
     %% add to emits: only one message pending per yarn (on node) at a time
+    %% yarns always defer replies (i.e. we should eventually reply, now or later)
     %% if the yarn is specified, assume deps are too
-    util:modify(State, [emits, {node(), Yarn}], Message, []);
+    State1 = defer_reply(Yarn, State),
+    util:modify(State1, [emits, {node(), Yarn}], Message, []);
 stitch_yarn(Message, State = #{message := #{yarn := Yarn}}) ->
-    %% by default thread with the yarn of the current message
+    %% thread with the yarn of the current message, if there is one that has one
     %% also add minimal deps on current message
-    stitch_yarn(min_deps(Message#{yarn => Yarn}, State), State).
+    stitch_yarn(min_deps(Message#{yarn => Yarn}, State), State);
+stitch_yarn(Message, State) ->
+    %% otherwise thread with a yarn based on the current locus
+    %% also add minimal deps on current message
+    %% NB: don't rely on the default name if creating multiple yarns
+    stitch_yarn(min_deps(Message#{yarn => after_locus(State)}, State), State).
 
 suture_yarn(Message = #{yarn := _}, State) ->
     %% emit a message that depends on the entire current context
@@ -542,24 +569,19 @@ suture_yarn(Message, State = #{message := #{yarn := Yarn}}) ->
 %% Tasks have similar "defer until tip" semantics as emit messages
 %% however processes must be restored on wake, making them more complicated
 
-create_task(Base = #{name := _}, Node, Task, State) ->
-    erloom_surety:task(min_deps(Base, State), Node, Task, State);
-create_task(Name, Node, Task, State) ->
-    create_task(#{name => Name}, Node, Task, State).
-
 stitch_task(Base = #{name := _}, Node, Task, State) ->
-    %% thread the task messages with a contextual yarn
-    %% if its a base message, assume deps are set already
-    case util:lookup(State, [message, yarn]) of
-        undefined ->
-            %% if there's no yarn, make one
-            create_task(Base#{yarn => after_locus(State)}, Node, Task, State);
-        Yarn ->
-            %% use the current yarn
-            create_task(Base#{yarn => Yarn}, Node, Task, State)
-    end;
+    %% if its a base message, assume deps and yarn are set already
+    erloom_surety:task(Base, Node, Task, State);
+stitch_task(Name, Node, Task, State = #{message := #{yarn := Yarn}}) ->
+    %% thread with the yarn of the current message, if there is one that has one
+    %% also add minimal deps on current message
+    Base = min_deps(#{name => Name, yarn => Yarn}, State),
+    stitch_task(Base, Node, Task, State);
 stitch_task(Name, Node, Task, State) ->
-    stitch_task(min_deps(#{name => Name}, State), Node, Task, State).
+    %% otherwise thread with a yarn based on the current locus
+    %% also add minimal deps on current message
+    Base = min_deps(#{name => Name, yarn => after_locus(State)}, State),
+    stitch_task(Base, Node, Task, State).
 
 suture_task(Base = #{name := _}, Node, Task, State) ->
     %% task messages will depend on the entire current context, and be threaded
