@@ -2,7 +2,9 @@
 
 %% erloom api
 -export([lookup/2,
-         modify/3]).
+         modify/3,
+         accrue/3,
+         accrue/4]).
 
 %% public api
 -export([lock/2,
@@ -21,6 +23,12 @@ modify(State, Path, {_, _} = Term) ->
     util:modify(State, Path, Term);
 modify(State, Path, {_, _, locked} = Term) ->
     util:modify(State, Path, Term).
+
+accrue(State, Path, {Value, Version}) ->
+    accrue(State, Path, {Value, Version}, fun util:op/2).
+
+accrue(State, Path, {Value, Version}, Op) ->
+    modify(State, Path, {fun (Prior) -> Op(Prior, Value) end, Version}).
 
 lock(State, Path) ->
     case lookup(State, Path) of

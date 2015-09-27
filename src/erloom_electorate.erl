@@ -12,7 +12,7 @@
 create(_, _, State = #{elect := _}) ->
     State; %% electorate already exists
 create(Electors, Node, State = #{locus := Root}) ->
-    Change = {set, Electors},
+    Change = {'=', Electors},
     State1 = State#{elect => #{
                       root => Root,
                       known => Root,
@@ -55,13 +55,6 @@ tether(Change = #{path := Path}, State) ->
                 prior => erloom_chain:version(State, Path)
                },
     motion(Change1, State).
-
-change_list({add, Items}, List) ->
-    Items ++ List;
-change_list({remove, Items}, List) ->
-    List -- Items;
-change_list({set, Items}, _) ->
-    Items.
 
 is_descendant(Id, Id, _Elect) ->
     true;
@@ -111,12 +104,12 @@ get_electorate(Motion, State) ->
     %% walk from root conf to confid and calculate the voting group
     %% NB: not optimized for lots of changes to conf, could cache
     lists:foldl(fun ({_, {_, #{value := Change}, _}}, Acc) ->
-                        change_list(Change, Acc)
+                        util:op(Acc, Change)
                 end, [], get_ancestors(Motion, State)).
 
 get_electorate_diff(MotionId, Change, State) ->
     Old = get_electorate(get_motion(MotionId, State), State),
-    New = change_list(Change, Old),
+    New = util:op(Old, Change),
     {New -- Old, Old -- New}.
 
 get_motion(MotionId, State) ->
@@ -401,14 +394,12 @@ resolve_motion(MotionId, #{kind := chain, path := Path} = Motion, Mover, Decisio
     State1 =
         case Decision of
             {true, _} ->
-                %% passed a motion to chain: store value and bump version
-                Value = util:get(Motion, value),
-                S1 = State#{response => {ok, Value}},
-                erloom_chain:modify(S1, Path, {Value, MotionId});
+                %% passed a motion to chain: treat as a command now
+                loom:do(Motion#{version => MotionId}, State);
             _ ->
                 %% failed to chain: unlock
-                S1 = State#{response => {error, motion}},
-                erloom_chain:unlock(S1, Path, MotionId)
+                S1 = erloom_chain:unlock(State, Path, MotionId),
+                S1#{response => {error, motion}}
         end,
     motion_decided(Motion, Mover, Decision, State1);
 resolve_motion(_MotionId, Motion, Mover, Decision, State) ->

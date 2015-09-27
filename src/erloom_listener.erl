@@ -8,7 +8,7 @@ spawn(Spec) ->
 init(Spec) ->
     process_flag(trap_exit, true),
     Listener = self(),
-    Worker = erloom_worker:spawn(),
+    Worker = erloom_worker:spawn(Listener),
     State = loom:load(#{listener => Listener, worker => Worker, spec => Spec}),
     listen(catchup, State).
 
@@ -75,6 +75,7 @@ listen(ready, State = #{opts := Opts, active := Active, tasks := Tasks}) ->
 listen(busy, State = #{worker := Worker}) ->
     %% same as above, except we can't process new messages or replay logs while we are busy
     %% so dont handle new messages, and instead of actually catching up, return to busy state
+    %% only handle exits which will not cause us to update state
     receive
         {worker_done, _} = Term ->
             heard(busy, Term, State);
@@ -83,9 +84,17 @@ listen(busy, State = #{worker := Worker}) ->
             Worker ! {sync_logs, maps:with([from, front], Packet)},
             heard(busy, Term, State);
         {get_state, _} = Term ->
+            heard(busy, Term, State);
+        {'EXIT', From, Reason} = Term when From =:= Worker; Reason =:= shutdown; Reason =:= sleep ->
             heard(busy, Term, State)
     end.
 
+heard(_, {'EXIT', Worker, Reason}, #{worker := Worker}) ->
+    exit(Reason);
+heard(_, {'EXIT', _, shutdown}, _State) ->
+    exit(shutdown);
+heard(_, {'EXIT', _, sleep}, _State) ->
+    exit(sleep);
 heard(Phase, Term, State) ->
     react(Phase, Term, util:modify(State, [opts, idle_elapsed], 0)).
 
@@ -115,16 +124,8 @@ react(ready, {new_message, Message, Reply}, State) ->
 react(ready, {sync_logs, Packet}, State) ->
     %% we got a sync packet: write down entries and reply if needed, then catchup
     listen(catchup, erloom_sync:got_sync(Packet, State));
-react(ready, {'EXIT', Worker, Reason}, #{worker := Worker}) ->
-    exit(Reason);
-react(ready, {'EXIT', _, shutdown}, _State) ->
-    exit(shutdown);
-react(ready, {'EXIT', _, sleep}, _State) ->
-    exit(sleep);
-react(ready, {'EXIT', _, silent}, State) ->
-    listen(catchup, State);
 react(ready, Other, State) ->
-    %% during ready phase, all 'other' messages have a chance to do work (e.g. if trapping exits)
+    %% during ready phase, all 'other' messages have a chance to do work (e.g. ignored exits)
     %% we do catchup after, so new state can emit or whatever too
     listen(catchup, loom:handle_info(Other, State));
 

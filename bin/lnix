@@ -15,13 +15,18 @@ add_paths() ->
     code:add_paths([RelPath ++ "/ebin",
                     RelPath ++ "/deps/erlkit/ebin"]).
 
-main(Homes) ->
+main([Rel, Offs|Roots]) ->
     add_paths(),
-    lists:foldl(fun (H, _) -> lcat(H) end, nil, Homes).
+    lnix(Roots, {util:str(Rel), util:int(Offs)});
+main(_) ->
+    io:format("usage: ~s REL OFFS ROOTS...~n", [escript:script_name()]).
 
-lcat(Home) ->
-    erloom_logs:fold(
-      fun (Message, {{Node, IId}, {{R, A}, {R, B}}},  _) ->
-              io:format("~s ~s ~s ~8B ~8B ~s~n",
-                        [Node, IId, R, A, B, erloom_bin:format_message(Message)])
-      end, nil, Home).
+lnix([Root|Rest], {Rel, Offs} = Mark) ->
+    {ok, Log} = log:open(Root),
+    {ok, Data} = log:annul(Log, Mark),
+    ok = io:format("~s ~s ~8B\t~s~n",
+                   [Root, Rel, Offs, erloom_bin:format_message(binary_to_term(Data))]),
+    ok = log:close(Log),
+    lnix(Rest, Mark);
+lnix([], _) ->
+    ok.

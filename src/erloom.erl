@@ -54,7 +54,8 @@
          locus_before/1,
          locus_after/1,
          loci_before/1,
-         loci_after/1]).
+         loci_after/1,
+         loci_count/1]).
 
 %% command-line
 
@@ -142,3 +143,8 @@ loci_after(Loci) when is_list(Loci) ->
     lists:foldl(fun (L, A) -> edge_hull(locus_after(L), A) end, #{}, Loci);
 loci_after(Locus) ->
     locus_after(Locus).
+
+loci_count(List) when is_list(List) ->
+    length(List);
+loci_count(_) ->
+    1.

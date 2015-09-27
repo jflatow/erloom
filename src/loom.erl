@@ -24,7 +24,7 @@
 -type message() :: #{
                deps => erloom:edge(),
                refs => erloom:loci(),
-               type => start | stop | move | motion | ballot | ratify | fence | task | lookup | modify | remove | atom(),
+               type => start | stop | move | motion | ballot | ratify | fence | task | command | atom(),
                kind => atom(),
                yarn => term()
               }.
@@ -63,15 +63,20 @@
               kind => conf | chain | atom(),
               vote => vote(),
               fiat => decision(),
-              value => {add | remove | set, [node()]},
               retry => boolean(),
               limit => non_neg_integer()
-}.
+             }.
 -type ballot() :: #{  %% + message
               type => ballot,
               vote => vote(),
               fiat => decision()
-}.
+             }.
+-type command() :: #{ %% + message
+               kind => chain | atom(),
+               verb => lookup | modify | remove,
+               path => atom() | list(),
+               value => term()
+              }.
 
 -callback proc(spec()) -> pid().
 -callback home(spec()) -> home().
@@ -85,12 +90,12 @@
     {term(), term(), state()}.
 -callback write_through(message(), pos_integer(), state()) ->
     {non_neg_integer(), non_neg_integer()}.
+-callback handle_idle(state()) -> state().
+-callback handle_info(term(), state()) -> state().
 -callback handle_message(message(), node(), boolean(), state()) -> state().
 -callback vote_on_motion(motion(), node(), state()) -> {vote(), state()}.
 -callback motion_decided(motion(), node(), decision(), state()) -> state().
 -callback task_completed(message(), node(), term(), state()) -> state().
--callback handle_info(term(), state()) -> state().
--callback handle_idle(state()) -> state().
 -callback check_node(node(), pos_integer(), state()) -> state().
 
 -optional_callbacks([proc/1,
@@ -100,12 +105,12 @@
                      waken/1,
                      verify_message/2,
                      write_through/3,
+                     handle_idle/1,
+                     handle_info/2,
                      handle_message/4,
                      vote_on_motion/3,
                      motion_decided/4,
                      task_completed/4,
-                     handle_info/2,
-                     handle_idle/1,
                      check_node/3]).
 
 -export([seed/1,
@@ -140,18 +145,21 @@
          unmet_needs/2,
          verify_message/2,
          write_through/3,
+         handle_idle/1,
+         handle_info/2,
          handle_message/4,
          vote_on_motion/3,
          motion_decided/4,
          task_completed/4,
-         handle_info/2,
-         handle_idle/1,
          check_node/3]).
 
 -export([callback/3,
          callback/4]).
 
 -export([change_peers/2]).
+
+-spec do(command(), state()) -> state().
+-export([do/2]).
 
 -export([stitch_yarn/2,
          suture_yarn/2,
@@ -210,7 +218,7 @@ state(Spec) ->
 %% 'multicall' and 'multirecv' conveniently wrap calls to multiple nodes
 
 multicall(Nodes, Args) ->
-    multicall(Nodes, Args, 60000).
+    multicall(Nodes, Args, 30000).
 
 multicall(Nodes, Args, Timeout) ->
     {Replies, BadNodes} = rpc:multicall(Nodes, loom, multirecv, [Args], Timeout),
@@ -422,6 +430,23 @@ write_through(Message, N, State = #{spec := Spec}) ->
     %% how many copies of a message are required for a successful write? in what timeframe?
     callback(Spec, {write_through, 3}, [Message, N, State], {1, infinity}).
 
+handle_idle(State = #{spec := Spec}) ->
+    callback(Spec, {handle_idle, 1}, [State], fun () -> sleep(State) end).
+
+handle_info(Info, State = #{spec := Spec}) ->
+    %% handle all other messages received by the listener (or worker via the listener)
+    %% by default, if the loom doesn't takeover, behave as if we weren't trapping exits
+    Untrap =
+        fun () ->
+                case Info of
+                    {'EXIT', _, Reason} ->
+                        exit(Reason);
+                    _ ->
+                        State
+                end
+        end,
+    callback(Spec, {handle_info, 2}, [Info, State], Untrap).
+
 cancel_builtin(#{yarn := Yarn}, Node, State) when Node =:= node() ->
     %% cancel pending emit of a yarn every time we see one
     util:remove(State, [emits, {node(), Yarn}]);
@@ -446,26 +471,12 @@ handle_builtin(Message = #{type := ballot}, Node, State) ->
     erloom_electorate:handle_ballot(Message, Node, State);
 handle_builtin(Message = #{type := ratify}, Node, State) ->
     erloom_electorate:handle_ratify(Message, Node, State);
-
 handle_builtin(Message = #{type := task}, Node, State) ->
     %% task messages are for the surety to either retry or complete a task
     %% tasks run per node, transferring control is outside the scope
     erloom_surety:handle_task(Message, Node, State);
-
-handle_builtin(#{type := lookup, path := Path, kind := chain}, _Node, State) ->
-    State#{response => element(1, erloom_chain:lookup(State, Path))};
-handle_builtin(#{type := lookup, path := Path}, _Node, State) ->
-    State#{response => util:lookup(State, Path)};
-handle_builtin(#{type := modify, path := Path, value := Value, kind := chain}, _Node, State) ->
-    State1 = State#{former => erloom_chain:lookup(State, Path)},
-    erloom_chain:modify(State1, Path, {Value, after_locus(State1)});
-handle_builtin(#{type := modify, path := Path, value := Value}, _Node, State) ->
-    State1 = State#{former => util:lookup(State, Path)},
-    util:modify(State1, Path, Value);
-handle_builtin(#{type := remove, path := Path}, _Node, State) ->
-    State1 = State#{former => util:lookup(State, Path)},
-    util:remove(State1, Path);
-
+handle_builtin(Message = #{type := command}, _Node, State) ->
+    do(Message, State);
 handle_builtin(_Message, _Node, State) ->
     State.
 
@@ -489,12 +500,6 @@ task_completed(Message = #{name := config}, Node, Result, State = #{spec := Spec
     callback(Spec, {task_completed, 4}, [Message, Node, Result, State1], State1);
 task_completed(Message, Node, Result, State = #{spec := Spec}) ->
     callback(Spec, {task_completed, 4}, [Message, Node, Result, State], State).
-
-handle_info(Info, State = #{spec := Spec}) ->
-    callback(Spec, {handle_info, 2}, [Info, State], State).
-
-handle_idle(State = #{spec := Spec}) ->
-    callback(Spec, {handle_idle, 1}, [State], fun () -> sleep(State) end).
 
 check_node(Node, Unanswered, State = #{spec := Spec}) ->
     callback(Spec, {check_node, 3}, [Node, Unanswered, State], State).
@@ -524,19 +529,40 @@ callback(Spec, {Fun, Arity}, Args, Default) when is_tuple(Spec) ->
 
 change_peers({set, Nodes}, State) ->
     change_peers({add, Nodes}, State#{peers => #{}});
+change_peers({add, Add}, State) ->
+    util:accrue(State, peers, [{addnew, util:mapped(Add)}, {except, [node()]}]);
+change_peers({remove, Remove}, State) ->
+    util:accrue(State, peers, [{except, Remove}]).
 
-change_peers({add, [Node|Rest]}, State) when Node =:= node() ->
-    change_peers({add, Rest}, State);
-change_peers({add, [Node|Rest]}, State) ->
-    change_peers({add, Rest}, util:ifndef(State, [peers, Node], false));
+do(#{verb := lookup, path := Path, kind := chain}, State) ->
+    State#{response => element(1, erloom_chain:lookup(State, Path))};
+do(#{verb := lookup, path := Path}, State) ->
+    State#{response => util:lookup(State, Path)};
+do(#{verb := modify, path := Path, value := Value, kind := chain} = Command, State) ->
+    State1 = State#{former => erloom_chain:lookup(State, Path)},
+    State2 = erloom_chain:modify(State1, Path, {Value, vsn(Command, State)}),
+    State2#{response => {ok, Value}};
+do(#{verb := modify, path := Path, value := Value}, State) ->
+    State1 = State#{former => util:lookup(State, Path)},
+    util:modify(State1, Path, Value);
+do(#{verb := accrue, path := Path, value := Value, kind := chain} = Command, State) ->
+    State1 = State#{former => util:lookup(State, Path)},
+    State2 = erloom_chain:accrue(State1, Path, {Value, vsn(Command, State)}),
+    State2#{response => {ok, erloom_chain:value(State2, Path)}};
+do(#{verb := accrue, path := Path, value := Value}, State) ->
+    State1 = State#{former => util:lookup(State, Path)},
+    State2 = util:accrue(State1, Path, Value),
+    State2#{response => {ok, util:lookup(State2, Path)}};
+do(#{verb := remove, path := Path}, State) ->
+    State1 = State#{former => util:lookup(State, Path)},
+    util:remove(State1, Path);
+do(_, State) ->
+    State#{response => {error, unrecognized_command}}.
 
-change_peers({remove, [Node|Rest]}, State) when Node =:= node() ->
-    change_peers({remove, Rest}, State);
-change_peers({remove, [Node|Rest]}, State) ->
-    change_peers({remove, Rest}, util:remove(State, [peers, Node]));
-
-change_peers({_, []}, State) ->
-    State.
+vsn(#{version := Version}, _State) ->
+    Version;
+vsn(_, State) ->
+    after_locus(State).
 
 %% Yarns serve 3 purposes:
 %%  1. Deferring replies to a message

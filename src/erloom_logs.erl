@@ -192,7 +192,8 @@ replay(Fun, {{AId, A}, {AId, B}}, Node, State) ->
                           S1 = S#{point => P1, locus => {{Node, AId}, Range}},
                           Fun(binary_to_term(Data), Node, S1)
                   end, State1, {A, B}),
-    State2#{point => Point#{Node => {AId, After}}};
+    %% NB: defmax in case After < B when B is defined, i.e. if log entries are nullified
+    State2#{point => Point#{Node => {AId, util:defmax(After, B)}}};
 replay(Fun, {{AId, A}, {BId, B}}, Node, State) when AId < BId ->
     IId = next_id({Node, AId}, State),
     State1 = replay(Fun, {{AId, A}, {AId, undefined}}, Node, State),

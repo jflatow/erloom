@@ -1,15 +1,15 @@
 -module(erloom_worker).
 
--export([spawn/0]).
+-export([spawn/1]).
 
-spawn() ->
-    spawn_link(fun () -> init() end).
+spawn(Listener) ->
+    spawn_link(fun () -> init(Listener) end).
 
-init() ->
+init(Listener) ->
     process_flag(trap_exit, true),
-    wait().
+    wait(Listener).
 
-wait() ->
+wait(Listener) ->
     receive
         {{new_message, Message, Reply}, State} ->
             %% writing to peers before updating is not arbitrary
@@ -24,16 +24,20 @@ wait() ->
             done(State1);
         {sync_logs, _} ->
             %% flush extraneous messages while we are not waiting for acks
-            wait();
+            wait(Listener);
+        {'EXIT', Listener, Reason} ->
+            %% live or die with the listener
+            exit(Reason);
         {'EXIT', _, normal} ->
             %% normal exits trap normally
-            wait();
+            wait(Listener);
         {'EXIT', _, silent} ->
             %% trap exits to allow children (tasks) to be killed quietly
-            wait();
-        {'EXIT', _, Reason} ->
-            %% all other exits happen as if we weren't trapping
-            exit(Reason)
+            wait(Listener);
+        Other ->
+            %% everything else gets forwarded to the listener
+            Listener ! Other,
+            wait(Listener)
     end.
 
 done(State = #{listener := Listener, status := Status}) ->
@@ -47,7 +51,7 @@ done(State = #{listener := Listener, status := Status}) ->
                 State
         end,
     Listener ! {worker_done, State1},
-    wait().
+    wait(Listener).
 
 store_default(Message = #{yarn := Yarn}, undefined, State = #{reply := Replies}) ->
     State#{reply => Replies#{default => Yarn}, message => Message, response => ok};

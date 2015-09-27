@@ -4,10 +4,11 @@
 -export([home/1,
          opts/1,
          write_through/3,
+         handle_idle/1,
+         handle_info/2,
          handle_message/4,
          vote_on_motion/3,
-         motion_decided/4,
-         handle_idle/1]).
+         motion_decided/4]).
 
 home({agent, Name}) ->
     filename:join([var, url:esc(node()), Name]).
@@ -29,6 +30,14 @@ write_through(#{write := W}, _N, _State) when is_integer(W) ->
 write_through(_Message, _N, _State) ->
     {1, infinity}.
 
+handle_idle(State) ->
+    io:format("idling~n"),
+    loom:sleep(State).
+
+handle_info(Info, State) ->
+    io:format("info: ~p~n", [Info]),
+    State.
+
 handle_message(#{do := save}, _Node, true, State) ->
     loom:maybe_reply(loom:save(State));
 handle_message(#{do := get_state}, _Node, true, State) ->
@@ -37,8 +46,8 @@ handle_message(#{do := emit}, _Node, true, State) ->
     loom:stitch_yarn(#{do => reply}, State);
 handle_message(#{do := reply}, _Node, true, State) ->
     loom:maybe_reply(got_it, State);
-handle_message(#{chain := {Path, Value}}, _Node, true, State) ->
-    loom:maybe_chain(#{path => Path, value => Value}, State);
+handle_message(#{chain := Command}, _Node, true, State) ->
+    loom:maybe_chain(Command, State);
 handle_message(#{type := start}, Node, true, State) ->
     io:format("~p started~n", [Node]),
     loom:maybe_reply(State);
@@ -68,7 +77,3 @@ motion_decided(#{kind := chain, path := xyz}, Mover, {true, _}, State) when Move
 motion_decided(#{yarn := Yarn}, Mover, Decision, State) ->
     io:format("~p decided ~p for ~p from ~p~n", [node(), Decision, Yarn, Mover]),
     loom:maybe_reply(Decision, State).
-
-handle_idle(State) ->
-    io:format("idling~n"),
-    loom:sleep(State).
