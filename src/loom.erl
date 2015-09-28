@@ -326,8 +326,8 @@ stop(_, State = #{active := false}) ->
     State;
 stop(Node, State) when Node =:= node() ->
     %% node has been asked to leave the group
-    State1 = erloom_surety:pause_tasks(State),
-    State1#{active => false};
+    %% allow tasks to finish (which is why task messages are always accepted)
+    State#{active => false};
 stop(_, State) ->
     State.
 
@@ -400,8 +400,10 @@ unmet_needs(Message, #{point := Point}) ->
             nil
     end.
 
-ready_to_accept(#{type := start}, _State) ->
+ready_to_accept(#{type := start}, #{status := S}) when S =:= waiting; S =:= awake ->
     {true, start};
+ready_to_accept(#{type := task}, #{status := awake}) ->
+    {true, task};
 ready_to_accept(_Message, #{status := awake, active := true}) ->
     {true, running};
 ready_to_accept(_Message, #{status := awake}) ->
@@ -471,9 +473,9 @@ handle_builtin(Message = #{type := ballot}, Node, State) ->
     erloom_electorate:handle_ballot(Message, Node, State);
 handle_builtin(Message = #{type := ratify}, Node, State) ->
     erloom_electorate:handle_ratify(Message, Node, State);
+
 handle_builtin(Message = #{type := task}, Node, State) ->
     %% task messages are for the surety to either retry or complete a task
-    %% tasks run per node, transferring control is outside the scope
     erloom_surety:handle_task(Message, Node, State);
 handle_builtin(Message = #{type := command}, _Node, State) ->
     do(Message, State);
@@ -527,12 +529,12 @@ callback(Mod, {Fun, Arity}, Args, Default) when is_atom(Mod) ->
 callback(Spec, {Fun, Arity}, Args, Default) when is_tuple(Spec) ->
     callback(element(1, Spec), {Fun, Arity}, Args, Default).
 
-change_peers({set, Nodes}, State) ->
-    change_peers({add, Nodes}, State#{peers => #{}});
-change_peers({add, Add}, State) ->
-    util:accrue(State, peers, [{addnew, util:mapped(Add)}, {except, [node()]}]);
-change_peers({remove, Remove}, State) ->
-    util:accrue(State, peers, [{except, Remove}]).
+change_peers({'+', Nodes}, State) ->
+    util:accrue(State, peers, [{addnew, util:mapped(Nodes)}, {except, [node()]}]);
+change_peers({'-', Nodes}, State) ->
+    util:accrue(State, peers, [{except, Nodes}]);
+change_peers({'=', Nodes}, State) ->
+    change_peers({'+', Nodes}, State#{peers => #{}}).
 
 do(#{verb := lookup, path := Path, kind := chain}, State) ->
     State#{response => element(1, erloom_chain:lookup(State, Path))};
@@ -613,8 +615,10 @@ suture_task(Base = #{name := _}, Node, Task, State) ->
     %% task messages will depend on the entire current context, and be threaded
     %% useful if trigger is not just the current message but a set of messages
     stitch_task(max_deps(Base, State), Node, Task, State);
+suture_task(Name, Node, Task, State = #{message := #{yarn := Yarn}}) ->
+    suture_task(#{name => Name, yarn => Yarn}, Node, Task, State);
 suture_task(Name, Node, Task, State) ->
-    suture_task(#{name => Name}, Node, Task, State).
+    suture_task(#{name => Name, yarn => after_locus(State)}, Node, Task, State).
 
 make_motion(Motion, State) ->
     erloom_electorate:motion(Motion, State).

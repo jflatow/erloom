@@ -15,13 +15,20 @@ init(Spec) ->
 listen(catchup, State = #{status := awake, prior := _, emits := Emits}) ->
     %% first, give a chance for an unstable state to emit any messages to itself
     %% this will repeat until we reach a stable state
-    case Emits of
-        [] ->
-            %% no more emissions: attempt to replay logs from point to front
-            replay_logs(State);
-        [{_Key, Message}|Rest] ->
-            %% treat an emission as a new message to self
-            work_on({new_message, Message, undefined}, State#{emits => Rest})
+    case at_tip(State) of
+        true ->
+            %% we are at our own tip, we can emit
+            case Emits of
+                [] ->
+                    %% no more emissions: attempt to replay logs from point to front
+                    replay_logs(State);
+                [{_Key, Message}|Rest] ->
+                    %% treat an emission as a new message to self
+                    work_on({new_message, Message, undefined}, State#{emits => Rest})
+            end;
+        false ->
+            %% we are not at our tip, keep trying (i.e. we probably just recovered)
+            replay_logs(State)
     end;
 listen(catchup, State = #{status := waking, point := Front, front := Front}) ->
     %% we're almost awake and we've caught up to front: finish waking up
@@ -62,7 +69,7 @@ listen(ready, State = #{opts := Opts, active := Active, tasks := Tasks}) ->
                 end,
             State2 =
                 case IdleElapsed + Timeout of
-                    _ when not Active ->
+                    _ when not Active, map_size(Tasks) =:= 0 ->
                         loom:sleep(State1);
                     E2 when E2 >= IdleTimeout, map_size(Tasks) =:= 0 ->
                         loom:handle_idle(util:modify(State1, [opts, idle_elapsed], 0));
@@ -142,6 +149,9 @@ react(busy, {worker_done, NewState}, State = #{status := _, front := Front}) ->
     listen(catchup, check_recovery(State2));
 react(busy, {sync_logs, Packet}, State) ->
     listen(busy, erloom_sync:got_sync(Packet, State)).
+
+at_tip(#{point := Point, front := Front}) ->
+    util:get(Point, node()) =:= util:get(Front, node()).
 
 check_recovery(State = #{status := recovering, peers := Peers, front := Front, edges := Edges}) ->
     %% keep recovering until:

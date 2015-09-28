@@ -462,7 +462,7 @@ config(ConfId, Change, Node, IsRoot, State) ->
     %% initiate a sync right away to cut down on chance that deps will be missing
     Pending = {Add, _} = get_electorate_diff(ConfId, Change, State),
     State1 = util:modify(State, [elect, pending, ConfId], Pending),
-    State2 = loom:change_peers({add, Add}, State1),
+    State2 = loom:change_peers({'+', Add}, State1),
     State3 = erloom_sync:maybe_push(State2),
     State4 = loom:suture_task(config, Node, {fun do_config/2, ConfId}, State3),
     case Node of
@@ -507,7 +507,7 @@ done_config(ConfId, Change, Node, State) ->
     %% in that case it will be impossible to stop as it will reject everything except the start
     {_, Remove} = get_electorate_diff(ConfId, Change, State),
     State1 = util:remove(State, [elect, pending, ConfId]),
-    State2 = loom:change_peers({remove, Remove}, State1),
+    State2 = loom:change_peers({'-', Remove}, State1),
     case Node of
         N when N =:= node() ->
             %% its ours, we're done
