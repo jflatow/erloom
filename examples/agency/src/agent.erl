@@ -59,6 +59,9 @@ handle_message(#{type := task, name := Name, kind := done}, Node, true, State) -
     loom:maybe_reply(State);
 handle_message(#{write := _}, _, true, State = #{wrote := Wrote}) ->
     loom:maybe_reply(Wrote, State);
+handle_message(#{type := T}, Node, true, State) when T =:= move; T =:= motion; T =:= ballot ->
+    io:format("~p ~p [not replying]~n", [Node, T]),
+    State;
 handle_message(Message, Node, true, State) ->
     io:format("~p new message: ~p~n", [Node, Message]),
     loom:maybe_reply(State);
@@ -71,7 +74,7 @@ vote_on_motion(Motion, Mover, State) ->
 
 motion_decided(#{kind := chain, path := xyz}, Mover, {true, _}, State) when Mover =:= node() ->
     GenVal = base64url:encode(crypto:rand_bytes(8)),
-    Modify = #{type => modify, kind => chain, path => xyz, value => GenVal},
+    Modify = #{type => command, verb => modify, kind => chain, path => xyz, value => GenVal},
     State1 = loom:suture_yarn(Modify, State),
     loom:maybe_reply([Mover, 'did pass chain'], State1);
 motion_decided(#{yarn := Yarn}, Mover, Decision, State) ->

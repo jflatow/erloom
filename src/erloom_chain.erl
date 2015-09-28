@@ -7,7 +7,7 @@
          accrue/4]).
 
 %% public api
--export([lock/2,
+-export([lock/3,
          unlock/3,
          value/2,
          version/2]).
@@ -17,11 +17,11 @@ lookup(State, Path) ->
 
 modify(State, Path, {Fun, Version}) when is_function(Fun) ->
     util:modify(State, Path, {Fun(value(State, Path)), Version});
-modify(State, Path, {Fun, Version, locked}) when is_function(Fun) ->
-    util:modify(State, Path, {Fun(value(State, Path)), Version, locked});
+modify(State, Path, {Fun, Version, Lock}) when is_function(Fun) ->
+    util:modify(State, Path, {Fun(value(State, Path)), Version, Lock});
 modify(State, Path, {_, _} = Term) ->
     util:modify(State, Path, Term);
-modify(State, Path, {_, _, locked} = Term) ->
+modify(State, Path, {_, _, _} = Term) ->
     util:modify(State, Path, Term).
 
 accrue(State, Path, {Value, Version}) ->
@@ -30,21 +30,21 @@ accrue(State, Path, {Value, Version}) ->
 accrue(State, Path, {Value, Version}, Op) ->
     modify(State, Path, {fun (Prior) -> Op(Prior, Value) end, Version}).
 
-lock(State, Path) ->
+lock(State, Path, Lock) ->
     case lookup(State, Path) of
         {Value, Version} ->
-            util:modify(State, Path, {Value, Version, locked});
-        {_, _, locked} ->
+            util:modify(State, Path, {Value, Version, Lock});
+        {_, _, Lock} ->
             State
     end.
 
-unlock(State, Path, Version) ->
+unlock(State, Path, Lock) ->
     case lookup(State, Path) of
         {_, _} ->
             State;
-        {Value, Version, locked} ->
+        {Value, Version, Lock} ->
             util:modify(State, Path, {Value, Version});
-        {_, _, locked} ->
+        {_, _, _} ->
             State
     end.
 
@@ -52,7 +52,7 @@ value(State, Path) ->
     case lookup(State, Path) of
         {Value, _} ->
             Value;
-        {Value, _, locked} ->
+        {Value, _, _} ->
             Value
     end.
 
@@ -60,6 +60,6 @@ version(State, Path) ->
     case lookup(State, Path) of
         {_, Version} ->
             Version;
-        {_, Version, locked} ->
+        {_, Version, _} ->
             Version
     end.

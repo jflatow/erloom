@@ -39,15 +39,7 @@ motion(Motion, State) ->
                 type => motion,
                 refs => util:lookup(State, [elect, current])
                },
-    {Motion2, State1} =
-        case util:get(Motion1, vote) of
-            undefined ->
-                {Vote, S} = vote_on_motion(Motion1, node(), State),
-                {Motion1#{vote => Vote}, S};
-            _ ->
-                {Motion1, State}
-        end,
-    loom:stitch_yarn(Motion2, State1).
+    loom:stitch_yarn(Motion1, State).
 
 tether(Change = #{path := Path}, State) ->
     Change1 = Change#{
@@ -163,50 +155,46 @@ handle_motion(Motion = #{refs := ConfId}, Mover, State) ->
         undefined ->
             %% we didn't save, must have been predicated on an impossible electorate
             resolve_motion(MotionId, Motion, Mover, {false, premise}, State1);
-        _ when Mover =:= node() ->
-            %% its our motion, no need to emit if we were going to
-            handle_ballot(Motion, Mover, State1);
         _ ->
-            %% not our motion, we should maybe try to vote on it
-            State2 =
-                case util:get(Motion, fiat) of
-                    undefined ->
-                        %% not a fiat, normal voting
-                        case lists:member(node(), get_electorate(Motion, State)) of
-                            true ->
-                                %% we are part of the motion's electorate, vote one way or another
-                                case util:lookup(State1, [elect, current]) of
-                                    ConfId ->
-                                        %% the motion has the 'right' electorate
-                                        {Vote, S} = vote_on_motion(Motion, Mover, State1),
-                                        vote(MotionId, Motion, Vote, S);
-                                    _ ->
-                                        %% we don't agree about the electorate
-                                        vote(MotionId, Motion, {nay, electorate}, State1)
-                                end;
-                            false ->
-                                %% not part of the motion's electorate, our vote won't count anyway
-                                State1
-                        end;
-                    _ ->
-                        %% its a fiat, no need to vote
-                        State1
-                end,
-            handle_ballot(Motion, Mover, State2)
+            %% we saved, we should maybe try to vote on it
+            case util:get(Motion, fiat) of
+                undefined ->
+                    %% not a fiat, normal voting
+                    case lists:member(node(), get_electorate(Motion, State)) of
+                        true ->
+                            %% we are part of the motion's electorate, vote one way or another
+                            case util:lookup(State1, [elect, current]) of
+                                ConfId ->
+                                    %% the motion has the 'right' electorate
+                                    {Vote, S} = vote_on_motion(MotionId, Motion, Mover, State1),
+                                    vote(MotionId, Motion, Vote, S);
+                                _ ->
+                                    %% we don't agree about the electorate
+                                    vote(MotionId, Motion, {nay, electorate}, State1)
+                            end;
+                        false ->
+                            %% not part of the motion's electorate, our vote won't count anyway
+                            State1
+                    end;
+                _ ->
+                    %% its a fiat, no need to vote
+                    State1
+            end
     end.
 
-handle_ballot(Ballot, Node, State) when Node =:= node() ->
-    %% its our ballot, no need to emit if we were going to
-    %% if the motion was a conf change, we might need to apply it
+handle_ballot(Ballot, Mover, State) ->
     MotionId = get_motion_id(Ballot, State),
-    State1 = maybe_save_ballot(Ballot, MotionId, Node, State),
-    State2 = maybe_change_conf(Ballot, MotionId, State1),
-    adjudicate(Ballot, MotionId, State2);
-handle_ballot(Ballot, Node, State) ->
-    %% its not our ballot, we'll count it in a sec (maybe)
-    MotionId = get_motion_id(Ballot, State),
-    State1 = maybe_save_ballot(Ballot, MotionId, Node, State),
-    adjudicate(Ballot, MotionId, State1).
+    State1 = maybe_save_ballot(Ballot, MotionId, Mover, State),
+    State2 =
+        case Mover of
+            Node when Node =:= node() ->
+                %% its ours, if the motion was a conf change, we might need to apply it
+                maybe_change_conf(Ballot, MotionId, State1);
+            _ ->
+                %% not ours, no need to commit anything
+                State1
+        end,
+    adjudicate(Ballot, MotionId, State2).
 
 handle_ratify(#{refs := MotionId}, Node, State) ->
     case get_motion(MotionId, State) of
@@ -373,35 +361,40 @@ reflect_decision(MotionId, {Kids, Motion, _}, Decision, State = #{elect := Elect
                         reflect_decision(Kid, util:get(E, Kid), {false, premise}, S)
                 end, State3, Kids).
 
-vote_on_motion(#{kind := conf}, _, State) ->
+vote_on_motion(_, #{kind := conf}, _, State) ->
     {{yea, ok}, State};
-vote_on_motion(#{kind := chain, path := Path, prior := Prior}, _, State) ->
+vote_on_motion(MotionId, #{kind := chain, path := Path, prior := Prior} = Motion, Mover, State) ->
     case erloom_chain:lookup(State, Path) of
         {_, _, locked} ->
             %% the path is locked, cannot accept
             {{nay, locked}, State};
         {_, Prior} ->
-            %% the prior matches, accept by locking
-            {{yea, ok}, erloom_chain:lock(State, Path)};
+            %% the prior matches, lock if accepted
+            case loom:vote_on_motion(Motion, Mover, State) of
+                {{yea, _} = Vote, S} ->
+                    {Vote, erloom_chain:lock(S, Path, MotionId)};
+                {Vote, S} ->
+                    {Vote, S}
+            end;
         {_, _} ->
             %% the prior doesn't match, cannot accept
             {{nay, version}, State}
     end;
-vote_on_motion(Motion, Mover, State) ->
+vote_on_motion(_, Motion, Mover, State) ->
     loom:vote_on_motion(Motion, Mover, State).
 
 resolve_motion(MotionId, #{kind := chain, path := Path} = Motion, Mover, Decision, State) ->
-    State1 =
+    State1 = erloom_chain:unlock(State, Path, MotionId),
+    State2 =
         case Decision of
             {true, _} ->
                 %% passed a motion to chain: treat as a command now
-                loom:do(Motion#{version => MotionId}, State);
+                loom:do(Motion#{version => MotionId}, State1);
             _ ->
-                %% failed to chain: unlock
-                S1 = erloom_chain:unlock(State, Path, MotionId),
-                S1#{response => {error, motion}}
+                %% failed to chain
+                State1#{response => {error, motion}}
         end,
-    motion_decided(Motion, Mover, Decision, State1);
+    motion_decided(Motion, Mover, Decision, State2);
 resolve_motion(_MotionId, Motion, Mover, Decision, State) ->
     motion_decided(Motion, Mover, Decision, State).
 

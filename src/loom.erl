@@ -61,7 +61,6 @@
 -type motion() :: #{  %% + message
               type => motion,
               kind => conf | chain | atom(),
-              vote => vote(),
               fiat => decision(),
               retry => boolean(),
               limit => non_neg_integer()
@@ -73,7 +72,7 @@
              }.
 -type command() :: #{ %% + message
                kind => chain | atom(),
-               verb => lookup | modify | remove,
+               verb => lookup | modify | remove | atom(),
                path => atom() | list(),
                value => term()
               }.
