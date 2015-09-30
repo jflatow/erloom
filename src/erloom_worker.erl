@@ -54,9 +54,9 @@ done(State = #{listener := Listener, status := Status}) ->
     wait(Listener).
 
 store_default(Message = #{yarn := Yarn}, undefined, State = #{reply := Replies}) ->
-    State#{reply => Replies#{default => Yarn}, message => Message, response => ok};
+    State#{reply => Replies#{default => Yarn}, message => Message, response => undefined};
 store_default(Message, Reply, State = #{reply := Replies}) ->
-    State#{reply => Replies#{default => Reply}, message => Message, response => ok}.
+    State#{reply => Replies#{default => Reply}, message => Message, response => undefined}.
 
 point_to_front(Node, State) ->
     util:modify(State, [point, Node], util:lookup(State, [front, Node])).

@@ -46,7 +46,7 @@ handle_task(#{kind := done} = Message, Node, State) ->
 handle_task(#{kind := fail} = Message, Node, State) ->
     complete_task(Message, Node, State).
 
-complete_task(#{name := Name, value := Result} = Message, Node, State) ->
+complete_task(#{name := Name} = Message, Node, State) ->
     State1 =
         case util:lookup(State, [tasks, Name]) of
             {Pid, Stack} ->
@@ -67,17 +67,17 @@ complete_task(#{name := Name, value := Result} = Message, Node, State) ->
                 %% somehow doesn't exist, can't happen normally, but keep going anyway
                 State
         end,
-    loom:task_completed(Message, Node, Result, State1).
+    loom:task_completed(Message, Node, util:get(Message, value), State1).
 
 spawn_task(_, [{Node, _}|_], _) when Node =/= node() ->
     undefined;
-spawn_task(_, [{_, {{Fun, Arg}, Base}}|_], State = #{listener := L}) ->
+spawn_task(_, [{_, {{Fun, Arg}, Base}}|_], State) ->
     Run =
         fun Loop(A, S) ->
                 case catch Fun(A, S) of
                     {retry, Wait} ->
                         %% if the arg doesn't change there's no need to send a message
-                        receive after time:timeout(Wait) -> Loop(A, loom:state(L)) end;
+                        receive after time:timeout(Wait) -> Loop(A, loom:state(S)) end;
                     {retry, A1, Wait} ->
                         %% if the arg changes we send a message to notify the loom
                         %% if we crash, we must either:
@@ -86,14 +86,14 @@ spawn_task(_, [{_, {{Fun, Arg}, Base}}|_], State = #{listener := L}) ->
                         %%  3. try the next arg with an additional wait penalty
                         %% regardless, we can't avoid the possibility of repeating an arg
                         %% crashing is rare, all options have issues: do something simple (#2)
-                        loom:call(L, Base#{type => task, kind => retry, value => A1}),
-                        receive after time:timeout(Wait) -> Loop(A1, loom:state(L)) end;
+                        loom:call(S, Base#{type => task, kind => retry, value => A1}),
+                        receive after time:timeout(Wait) -> Loop(A1, loom:state(S)) end;
                     {done, Result} ->
                         %% when we are done, notify the loom so we can finish the task
-                        loom:call(L, Base#{type => task, kind => done, value => Result});
+                        loom:call(S, Base#{type => task, kind => done, value => Result});
                     Other ->
                         %% user failure happens, treat it like done but different
-                        loom:call(L, Base#{type => task, kind => fail, value => Other})
+                        loom:call(S, Base#{type => task, kind => fail, value => Other})
                 end
         end,
     spawn_link(fun () -> Run(Arg, State) end).

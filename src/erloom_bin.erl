@@ -21,8 +21,8 @@ line(Message) ->
 
 spin(Yarn) when is_map(Yarn) ->
     util:join(
-      maps:fold(fun (K, {X, Y}, A) when is_atom(K), is_binary(X) ->
-                        [io_lib:format("~s ~s ~p", [K, X, Y])|A];
+      maps:fold(fun (K, {IId, {Rel, Offs}}, A) when is_atom(K), is_binary(IId) ->
+                        [io_lib:format("~s ~s ~s ~p", [K, IId, Rel, Offs])|A];
                     (K, V, A) ->
                         [io_lib:format("~p:~p", [K, V])|A]
                 end, [], Yarn), "/");

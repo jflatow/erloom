@@ -33,11 +33,12 @@ listen(catchup, State = #{status := awake, prior := _, emits := Emits}) ->
 listen(catchup, State = #{status := waking, point := Front, front := Front}) ->
     %% we're almost awake and we've caught up to front: finish waking up
     listen(catchup, loom:waken(State));
+listen(catchup, State = #{status := S, prior := _}) when S =:= waiting; S =:= recovering ->
+    %% we're still waiting / recovering: its not safe to write to our log yet
+    replay_logs(State);
 listen(catchup, State) ->
-    %% if this is our first time through, we might not be at our own tip
-    %%  dont emit or start tasks as we may have already done it
-    %% otherwise we might be waiting / recovering
-    %%  its not safe to write to our log yet
+    %% this is our first time through, we might not be at our own tip
+    %% dont emit or start tasks as we may have already done it
     replay_logs(loom:init(State));
 
 listen(ready, State = #{opts := Opts, active := Active, tasks := Tasks}) ->

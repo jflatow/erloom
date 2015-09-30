@@ -10,7 +10,9 @@
 -export([lock/3,
          unlock/3,
          value/2,
-         version/2]).
+         value/3,
+         version/2,
+         version/3]).
 
 lookup(State, Path) ->
     util:lookup(State, Path, {undefined, undefined}).
@@ -49,7 +51,10 @@ unlock(State, Path, Lock) ->
     end.
 
 value(State, Path) ->
-    case lookup(State, Path) of
+    value(State, Path, undefined).
+
+value(State, Path, Default) ->
+    case util:lookup(State, Path, {Default, undefined}) of
         {Value, _} ->
             Value;
         {Value, _, _} ->
@@ -57,7 +62,10 @@ value(State, Path) ->
     end.
 
 version(State, Path) ->
-    case lookup(State, Path) of
+    version(State, Path, undefined).
+
+version(State, Path, Default) ->
+    case util:lookup(State, Path, {undefined, Default}) of
         {_, Version} ->
             Version;
         {_, Version, _} ->

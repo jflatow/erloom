@@ -24,7 +24,7 @@
 -type message() :: #{
                deps => erloom:edge(),
                refs => erloom:loci(),
-               type => start | stop | move | motion | ballot | ratify | fence | task | command | atom(),
+               type => start | stop | motion | ballot | ratify | move | tether | fence | task | command | atom(),
                kind => atom(),
                yarn => term()
               }.
@@ -114,6 +114,7 @@
 
 -export([seed/1,
          seed/2,
+         seed/3,
          send/2,
          send/3,
          call/2,
@@ -175,7 +176,10 @@ seed(Spec) ->
     seed(Spec, [node()]).
 
 seed(Spec, Nodes) ->
-    call(Spec, #{type => start, seed => Nodes}).
+    seed(Spec, Nodes, infinity).
+
+seed(Spec, Nodes, Timeout) ->
+    call(Spec, #{type => start, seed => Nodes}, Timeout).
 
 %% 'send' is the main entry point for communicating with the loom
 %% returns the (local) pid for the loom which can be cached
@@ -184,6 +188,8 @@ seed(Spec, Nodes) ->
 send(Spec, Message) ->
     send(Spec, Message, fun (_) -> ok end).
 
+send(#{listener := Listener}, Message, Reply) ->
+    send(Listener, Message, Reply);
 send(Spec, Message, Reply) when not is_pid(Spec) ->
     send(proc(Spec), Message, Reply);
 send(Pid, Message, Reply) when is_map(Message), is_function(Reply) ->
@@ -344,7 +350,13 @@ defer_reply(Name, State = #{reply := Replies}) ->
     end.
 
 maybe_reply(State) ->
-    maybe_reply(util:get(State, response), State).
+    %% setting response to undefined, or removing it, disables the default response
+    case util:get(State, response) of
+        undefined ->
+            State;
+        Val ->
+            maybe_reply(Val, State)
+    end.
 
 maybe_reply(Response, State) ->
     maybe_reply(default, Response, State).
@@ -463,15 +475,19 @@ handle_builtin(Message = #{type := start}, Node, State) ->
 handle_builtin(Message = #{type := stop}, Node, State) ->
     erloom_electorate:handle_ctrl(Message, Node, stop(Node, State));
 
-handle_builtin(Message = #{type := move}, Node, State) when Node =:= node() ->
-    %% its convenient to be able to push a node to make a motion
-    erloom_electorate:motion(Message, State);
 handle_builtin(Message = #{type := motion}, Node, State) ->
     erloom_electorate:handle_motion(Message, Node, State);
 handle_builtin(Message = #{type := ballot}, Node, State) ->
     erloom_electorate:handle_ballot(Message, Node, State);
 handle_builtin(Message = #{type := ratify}, Node, State) ->
     erloom_electorate:handle_ratify(Message, Node, State);
+
+handle_builtin(Message = #{type := move}, Node, State) when Node =:= node() ->
+    %% its convenient to be able to push a node to make a motion
+    make_motion(Message, State);
+handle_builtin(Message = #{type := tether}, Node, State) when Node =:= node() ->
+    %% its convenient to be able to push a node to move a chain
+    maybe_chain(Message, State);
 
 handle_builtin(Message = #{type := task}, Node, State) ->
     %% task messages are for the surety to either retry or complete a task
@@ -547,13 +563,16 @@ do(#{verb := modify, path := Path, value := Value}, State) ->
     State1 = State#{former => util:lookup(State, Path)},
     util:modify(State1, Path, Value);
 do(#{verb := accrue, path := Path, value := Value, kind := chain} = Command, State) ->
-    State1 = State#{former => util:lookup(State, Path)},
+    State1 = State#{former => erloom_chain:lookup(State, Path)},
     State2 = erloom_chain:accrue(State1, Path, {Value, vsn(Command, State)}),
     State2#{response => {ok, erloom_chain:value(State2, Path)}};
 do(#{verb := accrue, path := Path, value := Value}, State) ->
     State1 = State#{former => util:lookup(State, Path)},
     State2 = util:accrue(State1, Path, Value),
     State2#{response => {ok, util:lookup(State2, Path)}};
+do(#{verb := remove, path := Path, kind := chain}, State) ->
+    State1 = State#{former => erloom_chain:lookup(State, Path)},
+    util:remove(State1, Path);
 do(#{verb := remove, path := Path}, State) ->
     State1 = State#{former => util:lookup(State, Path)},
     util:remove(State1, Path);

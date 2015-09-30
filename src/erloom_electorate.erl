@@ -10,7 +10,7 @@
          handle_task/4]).
 
 create(_, _, State = #{elect := _}) ->
-    State; %% electorate already exists
+    State#{response => already_exists};
 create(Electors, Node, State = #{locus := Root}) ->
     Change = {'=', Electors},
     State1 = State#{elect => #{
@@ -20,7 +20,7 @@ create(Electors, Node, State = #{locus := Root}) ->
                       pending => #{},
                       Root => {[], #{kind => conf, value => Change}, decided}
                      }},
-    config(Root, Change, Node, true, State1).
+    config(Root, Change, Node, true, State1#{response => ok}).
 
 motion(Motion = #{fiat := _}, State) ->
     %% fiat is forced, must depend on a known conf, or it might not take effect
@@ -151,36 +151,38 @@ ratify(MotionId, _Motion, State) ->
 handle_motion(Motion = #{refs := ConfId}, Mover, State) ->
     MotionId = get_motion_id(Motion, State),
     State1 = maybe_save_motion(Motion, MotionId, State),
-    case util:lookup(State1, [elect, MotionId]) of
-        undefined ->
-            %% we didn't save, must have been predicated on an impossible electorate
-            resolve_motion(MotionId, Motion, Mover, {false, premise}, State1);
-        _ ->
-            %% we saved, we should maybe try to vote on it
-            case util:get(Motion, fiat) of
-                undefined ->
-                    %% not a fiat, normal voting
-                    case lists:member(node(), get_electorate(Motion, State)) of
-                        true ->
-                            %% we are part of the motion's electorate, vote one way or another
-                            case util:lookup(State1, [elect, current]) of
-                                ConfId ->
-                                    %% the motion has the 'right' electorate
-                                    {Vote, S} = vote_on_motion(MotionId, Motion, Mover, State1),
-                                    vote(MotionId, Motion, Vote, S);
-                                _ ->
-                                    %% we don't agree about the electorate
-                                    vote(MotionId, Motion, {nay, electorate}, State1)
-                            end;
-                        false ->
-                            %% not part of the motion's electorate, our vote won't count anyway
-                            State1
-                    end;
-                _ ->
-                    %% its a fiat, no need to vote
-                    State1
-            end
-    end.
+    State2 =
+        case util:lookup(State1, [elect, MotionId]) of
+            undefined ->
+                %% we didn't save, must have been predicated on an impossible electorate
+                resolve_motion(MotionId, Motion, Mover, {false, premise}, State1);
+            _ ->
+                %% we saved, we should maybe try to vote on it
+                case util:get(Motion, fiat) of
+                    undefined ->
+                        %% not a fiat, normal voting
+                        case lists:member(node(), get_electorate(Motion, State)) of
+                            true ->
+                                %% we are part of the motion's electorate, vote one way or another
+                                case util:lookup(State1, [elect, current]) of
+                                    ConfId ->
+                                        %% the motion has the 'right' electorate
+                                        {Vote, S} = vote_on_motion(MotionId, Motion, Mover, State1),
+                                        vote(MotionId, Motion, Vote, S);
+                                    _ ->
+                                        %% we don't agree about the electorate
+                                        vote(MotionId, Motion, {nay, electorate}, State1)
+                                end;
+                            false ->
+                                %% not part of the motion's electorate, our vote won't count anyway
+                                State1
+                        end;
+                    _ ->
+                        %% its a fiat, no need to vote
+                        State1
+                end
+        end,
+    adjudicate(Motion, MotionId, State2).
 
 handle_ballot(Ballot, Mover, State) ->
     MotionId = get_motion_id(Ballot, State),
@@ -210,14 +212,16 @@ handle_ratify(#{refs := MotionId}, Node, State) ->
 handle_ctrl(#{type := Type, refs := ConfId}, Node, State) ->
     %% we keep a list of nodes that need start / stop for each config task
     %% when we see a node successfully started / stopped, we update the list
-    util:replace(State, [elect, pending, ConfId],
-                 fun ({Start, Stop}) when Type =:= start ->
-                         {lists:delete(Node, Start), Stop};
-                     ({Start, Stop}) when Type =:= stop ->
-                         {Start, lists:delete(Node, Stop)};
-                     (Other) ->
-                         Other
-                 end).
+    State1 =
+        util:replace(State, [elect, pending, ConfId],
+                     fun ({Start, Stop}) when Type =:= start ->
+                             {lists:delete(Node, Start), Stop};
+                         ({Start, Stop}) when Type =:= stop ->
+                             {Start, lists:delete(Node, Stop)};
+                         (Other) ->
+                             Other
+                     end),
+    State1#{response => ok}.
 
 handle_task(#{name := config}, Node, ConfId, State) ->
     case get_motion(ConfId, State) of
@@ -365,7 +369,7 @@ vote_on_motion(_, #{kind := conf}, _, State) ->
     {{yea, ok}, State};
 vote_on_motion(MotionId, #{kind := chain, path := Path, prior := Prior} = Motion, Mover, State) ->
     case erloom_chain:lookup(State, Path) of
-        {_, _, locked} ->
+        {_, _, _} ->
             %% the path is locked, cannot accept
             {{nay, locked}, State};
         {_, Prior} ->
@@ -392,11 +396,11 @@ resolve_motion(MotionId, #{kind := chain, path := Path} = Motion, Mover, Decisio
                 loom:do(Motion#{version => MotionId}, State1);
             _ ->
                 %% failed to chain
-                State1#{response => {error, motion}}
+                State1#{response => {error, Decision}}
         end,
     motion_decided(Motion, Mover, Decision, State2);
 resolve_motion(_MotionId, Motion, Mover, Decision, State) ->
-    motion_decided(Motion, Mover, Decision, State).
+    motion_decided(Motion, Mover, Decision, State#{response => {ok, Decision}}).
 
 motion_decided(Motion = #{retry := true}, Mover, Decision = {false, _}, State) when Mover =:= node() ->
     %% if the caller expects the motion to eventually pass (i.e. transient failures)
