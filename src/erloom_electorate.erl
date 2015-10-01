@@ -400,7 +400,14 @@ resolve_motion(MotionId, #{kind := chain, path := Path} = Motion, Mover, Decisio
         end,
     motion_decided(Motion, Mover, Decision, State2);
 resolve_motion(_MotionId, Motion, Mover, Decision, State) ->
-    motion_decided(Motion, Mover, Decision, State#{response => {ok, Decision}}).
+    State1 =
+        case Decision of
+            {true, _} ->
+                State#{response => {ok, Decision}};
+            _ ->
+                State#{response => {error, Decision}}
+        end,
+    motion_decided(Motion, Mover, Decision, State1).
 
 motion_decided(Motion = #{retry := true}, Mover, Decision = {false, _}, State) when Mover =:= node() ->
     %% if the caller expects the motion to eventually pass (i.e. transient failures)
@@ -488,8 +495,8 @@ do_config(ConfId, State = #{spec := Spec}) ->
             %% give the sync a little bit of a chance to work by waiting a sec
             %% optimize by using responses in addition to the sync channel
             receive after 1000 -> ok end,
-            A = loom:multicall(Start, [Spec, #{refs => ConfId, type => start}]),
-            B = loom:multicall(Stop, [Spec, #{refs => ConfId, type => stop}]),
+            A = loom:multirpc(Start, Spec, #{refs => ConfId, type => start}),
+            B = loom:multirpc(Stop, Spec, #{refs => ConfId, type => stop}),
             case {Start -- util:keys(A, ok), Stop -- util:keys(B, ok)} of
                 {[], []} ->
                     {done, ConfId};

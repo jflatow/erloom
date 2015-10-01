@@ -120,9 +120,11 @@
          call/2,
          call/3,
          state/1,
-         multicall/2,
-         multicall/3,
-         multirecv/1]).
+         rpc/3,
+         rpc/4,
+         multirpc/3,
+         multirpc/4,
+         multircv/3]).
 
 -export([proc/1,
          home/1,
@@ -220,18 +222,25 @@ call(Spec, Message, Timeout) ->
 state(Spec) ->
     call(Spec, get_state).
 
-%% 'multicall' and 'multirecv' conveniently wrap calls to multiple nodes
+%% 'rpc' conveniently wrap calls to looms on other nodes
 
-multicall(Nodes, Args) ->
-    multicall(Nodes, Args, 30000).
+rpc(Node, Spec, Message) ->
+    rpc(Node, Spec, Message, 30000).
 
-multicall(Nodes, Args, Timeout) ->
-    {Replies, BadNodes} = rpc:multicall(Nodes, loom, multirecv, [Args], Timeout),
-    maps:merge(maps:from_list(Replies),
-               maps:from_list([{Node, {error, noreply}} || Node <- BadNodes])).
+rpc(Node, Spec, Message, Timeout) ->
+    rpc:call(Node, loom, call, [Spec, Message, Timeout], Timeout).
 
-multirecv(Args) ->
-    {node(), apply(loom, call, Args)}.
+%% 'multirpc' and 'multircv' conveniently wrap calls to multiple nodes
+
+multirpc(Nodes, Spec, Message) ->
+    multirpc(Nodes, Spec, Message, 30000).
+
+multirpc(Nodes, Spec, Message, Timeout) ->
+    {Replies, BadNodes} = rpc:multicall(Nodes, loom, multircv, [Spec, Message, Timeout], Timeout),
+    maps:merge(maps:from_list(Replies), util:mapped(BadNodes, {error, noreply})).
+
+multircv(Spec, Message, Timeout) ->
+    {node(), apply(loom, call, [Spec, Message, Timeout])}.
 
 %% 'proc' defines the mechanism for 'find or spawn pid for spec'
 %% the default is to use spec as the registry key, which requires erloom app is running
