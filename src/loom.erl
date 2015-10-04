@@ -58,19 +58,20 @@
 
 -type vote() :: {yea, term()} | {nay, term()}.
 -type decision() :: {boolean(), term()}.
--type motion() :: #{  %% + message
+-type motion() :: #{  %% + message()
               type => motion,
               kind => conf | chain | atom(),
+              conf => root | undefined,
               fiat => decision(),
               retry => boolean(),
               limit => non_neg_integer()
              }.
--type ballot() :: #{  %% + message
+-type ballot() :: #{  %% + message()
               type => ballot,
               vote => vote(),
               fiat => decision()
              }.
--type command() :: #{ %% + message
+-type command() :: #{ %% + message()
                kind => chain | atom(),
                verb => lookup | modify | remove | atom(),
                path => atom() | list(),
@@ -262,7 +263,7 @@ opts(Spec) ->
       sync_interval => 60000 + random:uniform(10000), %% stagger for efficiency
       sync_log_limit => 1000,
       sync_push_prob => 0.10,
-      unanswered_max => 5
+      unanswered_max => 2
      },
     maps:merge(Defaults, callback(Spec, {opts, 1}, [Spec], #{})).
 
@@ -458,15 +459,7 @@ handle_idle(State = #{spec := Spec}) ->
 handle_info(Info, State = #{spec := Spec}) ->
     %% handle all other messages received by the listener (or worker via the listener)
     %% by default, if the loom doesn't takeover, behave as if we weren't trapping exits
-    Untrap =
-        fun () ->
-                case Info of
-                    {'EXIT', _, Reason} ->
-                        exit(Reason);
-                    _ ->
-                        State
-                end
-        end,
+    Untrap = fun () -> proc:untrap(Info, State) end,
     callback(Spec, {handle_info, 2}, [Info, State], Untrap).
 
 cancel_builtin(#{yarn := Yarn}, Node, State) when Node =:= node() ->
@@ -475,10 +468,6 @@ cancel_builtin(#{yarn := Yarn}, Node, State) when Node =:= node() ->
 cancel_builtin(_, _, State) ->
     State.
 
-handle_builtin(#{type := start, seed := Nodes}, Node, State) ->
-    %% the seed message sets the initial electorate, and thus the peer group
-    %% every node in the group should see / refer to the same seed message
-    erloom_electorate:create(Nodes, Node, start(Node, State));
 handle_builtin(Message = #{type := start}, Node, State) ->
     erloom_electorate:handle_ctrl(Message, Node, start(Node, State));
 handle_builtin(Message = #{type := stop}, Node, State) ->
@@ -561,9 +550,9 @@ change_peers({'=', Nodes}, State) ->
     change_peers({'+', Nodes}, State#{peers => #{}}).
 
 do(#{verb := lookup, path := Path, kind := chain}, State) ->
-    State#{response => element(1, erloom_chain:lookup(State, Path))};
+    State#{response => {ok, element(1, erloom_chain:lookup(State, Path))}};
 do(#{verb := lookup, path := Path}, State) ->
-    State#{response => util:lookup(State, Path)};
+    State#{response => {ok, util:lookup(State, Path)}};
 do(#{verb := modify, path := Path, value := Value, kind := chain} = Command, State) ->
     State1 = State#{former => erloom_chain:lookup(State, Path)},
     State2 = erloom_chain:modify(State1, Path, {Value, vsn(Command, State)}),

@@ -28,9 +28,6 @@ wait(Listener) ->
         {'EXIT', Listener, Reason} ->
             %% live or die with the listener
             exit(Reason);
-        {'EXIT', _, normal} ->
-            %% normal exits trap normally
-            wait(Listener);
         {'EXIT', _, silent} ->
             %% trap exits to allow children (tasks) to be killed quietly
             wait(Listener);

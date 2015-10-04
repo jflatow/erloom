@@ -1,7 +1,6 @@
 -module(erloom_electorate).
 
--export([create/3,
-         motion/2,
+-export([motion/2,
          tether/2,
          handle_motion/3,
          handle_ballot/3,
@@ -11,16 +10,21 @@
 
 create(_, _, State = #{elect := _}) ->
     State#{response => already_exists};
-create(Electors, Node, State = #{locus := Root}) ->
+create(Electors, Node, State = #{locus := Seed}) ->
+    %% the root conf is symbolic, to allow seeding different nodes with the same message
+    %% this increases availability during seeding while keeping voting results consistent
+    %% i.e. in case seed is received by a node, but it dies before replying
+    %%      if we didn't do this we'd have to be sure to wait for the same node to recover
+    %% NB: the seed message content must of course be identical between instances
     Change = {'=', Electors},
     State1 = State#{elect => #{
-                      root => Root,
-                      known => Root,
-                      current => Root,
+                      seed => Seed,
+                      known => root,
+                      current => root,
                       pending => #{},
-                      Root => {[], #{kind => conf, value => Change}, decided}
+                      root => {[], #{kind => conf, value => Change}, decided}
                      }},
-    config(Root, Change, Node, true, State1#{response => ok}).
+    config(root, Change, Node, State1#{response => ok}).
 
 motion(Motion = #{fiat := _}, State) ->
     %% fiat is forced, must depend on a known conf, or it might not take effect
@@ -30,16 +34,16 @@ motion(Motion = #{fiat := _}, State) ->
     %%  fiat decisions are made by the issuer, its up to them to know what they are doing
     Motion1 = Motion#{
                 type => motion,
-                refs => util:lookup(State, [elect, known])
+                conf => util:lookup(State, [elect, known])
                },
-    loom:stitch_yarn(Motion1, State);
+    loom:stitch_yarn(min_refs(Motion1, State), State);
 motion(Motion, State) ->
     %% not a fiat, voting predicated on currently believed conf
     Motion1 = Motion#{
                 type => motion,
-                refs => util:lookup(State, [elect, current])
+                conf => util:lookup(State, [elect, current])
                },
-    loom:stitch_yarn(Motion1, State).
+    loom:stitch_yarn(min_refs(Motion1, State), State).
 
 tether(Change = #{path := Path}, State) ->
     Change1 = Change#{
@@ -48,27 +52,56 @@ tether(Change = #{path := Path}, State) ->
                },
     motion(Change1, State).
 
+min_refs(Message = #{conf := root}, State) ->
+    %% add the refs, keeping the explicit conf id
+    Message#{refs => util:lookup(State, [elect, seed])};
+min_refs(Message = #{conf := ConfId}, _) ->
+    %% no need to keep the conf when we store it in refs
+    maps:without([conf], Message#{refs => ConfId}).
+
+get_conf_id(#{conf := ConfId}) ->
+    ConfId;
+get_conf_id(#{refs := ConfId}) ->
+    ConfId;
+get_conf_id(_) ->
+    undefined.
+
+get_motion_id(#{type := motion}, #{locus := Locus}) ->
+    %% we are processing the motion, the id is the locus
+    Locus;
+get_motion_id(#{type := ballot, refs := MotionId}, _State) ->
+    %% we are processing the ballot, the id is the ref
+    MotionId.
+
+get_motion(MotionId, #{elect := Elect}) ->
+    get_motion(MotionId, Elect);
+get_motion(MotionId, Elect) ->
+    case util:get(Elect, MotionId) of
+        undefined ->
+            undefined;
+        {_, Motion, _} ->
+            Motion
+    end.
+
 is_descendant(Id, Id, _Elect) ->
     true;
 is_descendant(Id, OId, Elect) ->
-    case util:get(Elect, Id) of
-        {_, #{refs := ParentId}, _} ->
-            is_descendant(ParentId, OId, Elect);
-        _->
-            false
+    case get_conf_id(get_motion(Id, Elect)) of
+        undefined ->
+            false;
+        ConfId ->
+            is_descendant(ConfId, OId, Elect)
     end.
 
-get_ancestors(#{refs := ParentId}, #{elect := Elect}) ->
-    get_ancestors(ParentId, Elect, []);
-get_ancestors(_Motion, _State) ->
-    [].
+get_ancestors(Motion, #{elect := Elect}) ->
+    get_ancestors(get_conf_id(Motion), Elect, []).
 
+get_ancestors(undefined, _, Acc) ->
+    Acc;
 get_ancestors(MotionId, Elect, Acc) ->
     case util:get(Elect, MotionId) of
-        MotionInfo = {_, #{refs := ParentId}, _} ->
-            get_ancestors(ParentId, Elect, [{MotionId, MotionInfo}|Acc]);
-        MotionInfo ->
-            [{MotionId, MotionInfo}|Acc]
+        MotionInfo = {_, Motion, _} ->
+            get_ancestors(get_conf_id(Motion), Elect, [{MotionId, MotionInfo}|Acc])
     end.
 
 get_children(MotionId, #{elect := Elect}) ->
@@ -87,8 +120,8 @@ get_siblings(MotionId, State = #{elect := Elect}) ->
             get_siblings(MotionId, MotionInfo, State)
     end.
 
-get_siblings(MotionId, {_, #{refs := Parent}, _}, State) ->
-    [C || C = {K, _} <- get_children(Parent, State), K =/= MotionId];
+get_siblings(MotionId, {_, Motion, _}, State) ->
+    [C || C = {K, _} <- get_children(get_conf_id(Motion), State), K =/= MotionId];
 get_siblings(_, _, _) ->
     [].
 
@@ -104,34 +137,28 @@ get_electorate_diff(MotionId, Change, State) ->
     New = util:op(Old, Change),
     {New -- Old, Old -- New}.
 
-get_motion(MotionId, State) ->
-    case util:lookup(State, [elect, MotionId]) of
-        undefined ->
-            undefined;
-        {_, Motion, _} ->
-            Motion
-    end.
-
-get_motion_id(#{type := motion}, #{locus := Locus}) ->
-    %% we are processing the motion, the id is the locus
-    Locus;
-get_motion_id(#{type := ballot, refs := MotionId}, _State) ->
-    %% we are processing the ballot, the id is the ref
-    MotionId.
-
 get_mover(MotionId) ->
     erloom:locus_node(MotionId).
 
-delete_motion(MotionId, #{refs := ParentId}, State = #{elect := Elect}) ->
+delete_motion(MotionId, Motion, State = #{elect := Elect}) ->
     %% remove the motion from the parent, and delete the motion
+    ConfId = get_conf_id(Motion),
     Elect1 =
-        case util:get(Elect, ParentId) of
+        case util:get(Elect, ConfId) of
             undefined ->
                 Elect;
             {Kids, Parent, Votes} ->
-                util:set(Elect, ParentId, {lists:delete(MotionId, Kids), Parent, Votes})
+                util:set(Elect, ConfId, {lists:delete(MotionId, Kids), Parent, Votes})
         end,
     util:set(State, elect, util:remove(Elect1, MotionId)).
+
+has_right_electorate(Motion, #{elect := #{current := ConfId}}) ->
+    case get_conf_id(Motion) of
+        ConfId ->
+            true;
+        _ ->
+            false
+    end.
 
 vote(MotionId, _Motion, Vote, State) ->
     Ballot = #{
@@ -148,7 +175,7 @@ ratify(MotionId, _Motion, State) ->
      },
     loom:suture_yarn(Ratification, State).
 
-handle_motion(Motion = #{refs := ConfId}, Mover, State) ->
+handle_motion(Motion, Mover, State) ->
     MotionId = get_motion_id(Motion, State),
     State1 = maybe_save_motion(Motion, MotionId, State),
     State2 =
@@ -164,12 +191,12 @@ handle_motion(Motion = #{refs := ConfId}, Mover, State) ->
                         case lists:member(node(), get_electorate(Motion, State)) of
                             true ->
                                 %% we are part of the motion's electorate, vote one way or another
-                                case util:lookup(State1, [elect, current]) of
-                                    ConfId ->
+                                case has_right_electorate(Motion, State1) of
+                                    true ->
                                         %% the motion has the 'right' electorate
                                         {Vote, S} = vote_on_motion(MotionId, Motion, Mover, State1),
                                         vote(MotionId, Motion, Vote, S);
-                                    _ ->
+                                    false ->
                                         %% we don't agree about the electorate
                                         vote(MotionId, Motion, {nay, electorate}, State1)
                                 end;
@@ -206,14 +233,18 @@ handle_ratify(#{refs := MotionId}, Node, State) ->
             State;
         #{kind := conf, value := Change} ->
             %% conf change has been ratified, start taking action
-            config(MotionId, Change, Node, false, State)
+            config(MotionId, Change, Node, State)
     end.
 
-handle_ctrl(#{type := Type, refs := ConfId}, Node, State) ->
+handle_ctrl(#{type := start, seed := Nodes}, Node, State) ->
+    %% the seed message sets the initial electorate, and thus the peer group
+    %% every node in the group should see / refer to the same seed message
+    create(Nodes, Node, State);
+handle_ctrl(Ctrl = #{type := Type}, Node, State) ->
     %% we keep a list of nodes that need start / stop for each config task
     %% when we see a node successfully started / stopped, we update the list
     State1 =
-        util:replace(State, [elect, pending, ConfId],
+        util:replace(State, [elect, pending, get_conf_id(Ctrl)],
                      fun ({Start, Stop}) when Type =:= start ->
                              {lists:delete(Node, Start), Stop};
                          ({Start, Stop}) when Type =:= stop ->
@@ -232,7 +263,8 @@ handle_task(#{name := config}, Node, ConfId, State) ->
             done_config(ConfId, Change, Node, State)
     end.
 
-maybe_save_motion(Motion = #{refs := ConfId}, MotionId, State = #{elect := Elect}) ->
+maybe_save_motion(Motion, MotionId, State = #{elect := Elect}) ->
+    ConfId = get_conf_id(Motion),
     case util:get(Elect, ConfId) of
         undefined ->
             %% the conf has been forgotten, it must be an impossible electorate
@@ -281,9 +313,9 @@ adjudicate(Ballot, MotionId, State = #{elect := Elect}) ->
         undefined ->
             %% the motion has already been decided
             State;
-        MotionInfo = {_, #{refs := ConfId}, _} ->
+        MotionInfo = {_, Motion, _} ->
             %% the motion is still a possibility (it exists, so its open)
-            case util:get(Elect, ConfId) of
+            case util:get(Elect, get_conf_id(Motion)) of
                 {_, _, decided} ->
                     %% the electorate is known to be valid
                     case util:get(Ballot, fiat) of
@@ -453,7 +485,7 @@ murder_conf_siblings(ConfId, State) ->
                         S
                 end, State, get_siblings(ConfId, State)).
 
-config(ConfId, Change, Node, IsRoot, State) ->
+config(ConfId, Change, Node, State) ->
     %% we *add* peers when the conf is ratified (i.e. before nodes are started)
     %% otherwise nodes won't get the deps they need in order to start
     %% store pending under locus so we can keep track of what's been started / stopped
@@ -476,7 +508,7 @@ config(ConfId, Change, Node, IsRoot, State) ->
         _ when Add =:= [] ->
             %% not ours, no need to fence when nothing was added
             State4;
-        _ when IsRoot ->
+        _ when ConfId =:= root ->
             %% not ours, no need to fence the root, everyone must have it at least when they start
             State4;
         _ ->
@@ -495,8 +527,8 @@ do_config(ConfId, State = #{spec := Spec}) ->
             %% give the sync a little bit of a chance to work by waiting a sec
             %% optimize by using responses in addition to the sync channel
             receive after 1000 -> ok end,
-            A = loom:multirpc(Start, Spec, #{refs => ConfId, type => start}),
-            B = loom:multirpc(Stop, Spec, #{refs => ConfId, type => stop}),
+            A = loom:multirpc(Start, Spec, min_refs(#{conf => ConfId, type => start}, State)),
+            B = loom:multirpc(Stop, Spec, min_refs(#{conf => ConfId, type => stop}, State)),
             case {Start -- util:keys(A, ok), Stop -- util:keys(B, ok)} of
                 {[], []} ->
                     {done, ConfId};
