@@ -178,38 +178,39 @@ ratify(MotionId, _Motion, State) ->
 handle_motion(Motion, Mover, State) ->
     MotionId = get_motion_id(Motion, State),
     State1 = maybe_save_motion(Motion, MotionId, State),
-    State2 =
-        case util:lookup(State1, [elect, MotionId]) of
+    State2 = maybe_save_pending(Motion, MotionId, State1),
+    State3 =
+        case util:lookup(State2, [elect, MotionId]) of
             undefined ->
                 %% we didn't save, must have been predicated on an impossible electorate
-                resolve_motion(MotionId, Motion, Mover, {false, premise}, State1);
+                resolve_motion(MotionId, Motion, Mover, {false, premise}, State2);
             _ ->
                 %% we saved, we should maybe try to vote on it
                 case util:get(Motion, fiat) of
                     undefined ->
                         %% not a fiat, normal voting
-                        case lists:member(node(), get_electorate(Motion, State)) of
+                        case lists:member(node(), get_electorate(Motion, State2)) of
                             true ->
                                 %% we are part of the motion's electorate, vote one way or another
-                                case has_right_electorate(Motion, State1) of
+                                case has_right_electorate(Motion, State2) of
                                     true ->
                                         %% the motion has the 'right' electorate
-                                        {Vote, S} = vote_on_motion(MotionId, Motion, Mover, State1),
+                                        {Vote, S} = vote_on_motion(MotionId, Motion, Mover, State2),
                                         vote(MotionId, Motion, Vote, S);
                                     false ->
                                         %% we don't agree about the electorate
-                                        vote(MotionId, Motion, {nay, electorate}, State1)
+                                        vote(MotionId, Motion, {nay, electorate}, State2)
                                 end;
                             false ->
                                 %% not part of the motion's electorate, our vote won't count anyway
-                                State1
+                                State2
                         end;
                     _ ->
                         %% its a fiat, no need to vote
-                        State1
+                        State2
                 end
         end,
-    adjudicate(Motion, MotionId, State2).
+    adjudicate(Motion, MotionId, State3).
 
 handle_ballot(Ballot, Mover, State) ->
     MotionId = get_motion_id(Ballot, State),
@@ -244,7 +245,7 @@ handle_ctrl(Ctrl = #{type := Type}, Node, State) ->
     %% we keep a list of nodes that need start / stop for each config task
     %% when we see a node successfully started / stopped, we update the list
     State1 =
-        util:replace(State, [elect, pending, get_conf_id(Ctrl)],
+        util:replace(State, [elect, pending, {conf, get_conf_id(Ctrl)}],
                      fun ({Start, Stop}) when Type =:= start ->
                              {lists:delete(Node, Start), Stop};
                          ({Start, Stop}) when Type =:= stop ->
@@ -292,6 +293,15 @@ maybe_save_ballot(#{vote := Vote}, MotionId, Node, State = #{elect := Elect}) ->
 maybe_save_ballot(#{fiat := _}, _, _, State) ->
     %% must be a fiat, in which case votes won't matter
     State.
+
+maybe_save_pending(#{kind := chain, path := Path}, MotionId, State) ->
+    util:accrue(State, [elect, pending, {chain, Path}], {'+', [MotionId]});
+maybe_save_pending(_Motion, _MotionId, State) ->
+    State.
+
+maybe_drop_pending(Key, MotionId, State) ->
+    State1 = util:accrue(State, [elect, pending, Key], {'-', [MotionId]}),
+    util:sluice(State1, [elect, pending, Key], []).
 
 maybe_change_conf(#{vote := {yea, _}}, MotionId, State = #{elect := Elect}) ->
     case util:get(Elect, MotionId) of
@@ -421,16 +431,17 @@ vote_on_motion(_, Motion, Mover, State) ->
 
 resolve_motion(MotionId, #{kind := chain, path := Path} = Motion, Mover, Decision, State) ->
     State1 = erloom_chain:unlock(State, Path, MotionId),
-    State2 =
+    State2 = maybe_drop_pending({chain, Path}, MotionId, State1),
+    State3 =
         case Decision of
             {true, _} ->
                 %% passed a motion to chain: treat as a command now
-                loom:do(Motion#{version => MotionId}, State1);
+                loom:cmd(Motion#{version => MotionId}, State2);
             _ ->
                 %% failed to chain
-                State1#{response => {error, Decision}}
+                State2#{response => {error, Decision}}
         end,
-    motion_decided(Motion, Mover, Decision, State2);
+    motion_decided(Motion, Mover, Decision, State3);
 resolve_motion(_MotionId, Motion, Mover, Decision, State) ->
     State1 =
         case Decision of
@@ -441,21 +452,6 @@ resolve_motion(_MotionId, Motion, Mover, Decision, State) ->
         end,
     motion_decided(Motion, Mover, Decision, State1).
 
-motion_decided(Motion = #{retry := true}, Mover, Decision = {false, _}, State) when Mover =:= node() ->
-    %% if the caller expects the motion to eventually pass (i.e. transient failures)
-    %% it can use retry / limit to have the mover reissue failed motions automatically
-    %% in general we should suture (not stitch) from 'motion_decided'
-    %% otherwise replay of emit could occur before the decision, causing re-emit
-    State1 =
-        case util:get(Motion, limit) of
-            undefined ->
-                loom:suture_yarn(Motion#{type => move}, State);
-            N when is_integer(N), N > 0 ->
-                loom:suture_yarn(Motion#{type => move, limit => N - 1}, State);
-            _ ->
-                State
-        end,
-    loom:motion_decided(Motion, Mover, Decision, State1);
 motion_decided(Motion, Mover, Decision, State) ->
     loom:motion_decided(Motion, Mover, Decision, State).
 
@@ -497,7 +493,7 @@ config(ConfId, Change, Node, State) ->
     %%   the tasks are run under a common name, ensuring a total order
     %% initiate a sync right away to cut down on chance that deps will be missing
     Pending = {Add, _} = get_electorate_diff(ConfId, Change, State),
-    State1 = util:modify(State, [elect, pending, ConfId], Pending),
+    State1 = util:modify(State, [elect, pending, {conf, ConfId}], Pending),
     State2 = loom:change_peers({'+', Add}, State1),
     State3 = erloom_sync:maybe_push(State2),
     State4 = loom:suture_task(config, Node, {fun do_config/2, ConfId}, State3),
@@ -520,7 +516,7 @@ do_config(ConfId, State = #{spec := Spec}) ->
     %% start / stop nodes that are added / removed
     %% the first try may reach the targets before the deps and fail
     %% its fine, we'll just retry, these messages are relatively uncommon anyway
-    case util:lookup(State, [elect, pending, ConfId]) of
+    case util:lookup(State, [elect, pending, {conf, ConfId}]) of
         {[], []} ->
             {done, ConfId};
         {Start, Stop} ->
@@ -542,7 +538,7 @@ done_config(ConfId, Change, Node, State) ->
     %% otherwise its possible a node being stopped won't receive its start before being removed
     %% in that case it will be impossible to stop as it will reject everything except the start
     {_, Remove} = get_electorate_diff(ConfId, Change, State),
-    State1 = util:remove(State, [elect, pending, ConfId]),
+    State1 = util:remove(State, [elect, pending, {conf, ConfId}]),
     State2 = loom:change_peers({'-', Remove}, State1),
     case Node of
         N when N =:= node() ->
