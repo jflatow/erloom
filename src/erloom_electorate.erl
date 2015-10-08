@@ -66,6 +66,9 @@ get_conf_id(#{refs := ConfId}) ->
 get_conf_id(_) ->
     undefined.
 
+get_conf(Motion, State) ->
+    get_motion(get_conf_id(Motion), State).
+
 get_motion_id(#{type := motion}, #{locus := Locus}) ->
     %% we are processing the motion, the id is the locus
     Locus;
@@ -93,15 +96,15 @@ is_descendant(Id, OId, Elect) ->
             is_descendant(ConfId, OId, Elect)
     end.
 
-get_ancestors(Motion, #{elect := Elect}) ->
-    get_ancestors(get_conf_id(Motion), Elect, []).
+get_ancestors(ConfId, #{elect := Elect}) ->
+    get_ancestors(ConfId, Elect, []).
 
 get_ancestors(undefined, _, Acc) ->
     Acc;
-get_ancestors(MotionId, Elect, Acc) ->
-    case util:get(Elect, MotionId) of
-        MotionInfo = {_, Motion, _} ->
-            get_ancestors(get_conf_id(Motion), Elect, [{MotionId, MotionInfo}|Acc])
+get_ancestors(ConfId, Elect, Acc) ->
+    case util:get(Elect, ConfId) of
+        ConfInfo = {_, Motion, _} ->
+            get_ancestors(get_conf_id(Motion), Elect, [{ConfId, ConfInfo}|Acc])
     end.
 
 get_children(MotionId, #{elect := Elect}) ->
@@ -125,12 +128,24 @@ get_siblings(MotionId, {_, Motion, _}, State) ->
 get_siblings(_, _, _) ->
     [].
 
+get_predicates(Motion, #{elect := Elect}) ->
+    get_ancestors(get_conf_id(Motion), Elect, []).
+
 get_electorate(Motion, State) ->
     %% walk from root conf to confid and calculate the voting group
     %% NB: not optimized for lots of changes to conf, could cache
     lists:foldl(fun ({_, {_, #{value := Change}, _}}, Acc) ->
                         util:op(Acc, Change)
-                end, [], get_ancestors(Motion, State)).
+                end, [], get_predicates(Motion, State)).
+
+list_electorates(ConfId, State) ->
+    lists:foldl(fun ({Id, {_, #{value := Change}, _}}, Acc) ->
+                        {_, Electorate} = util:first(Acc, {undefined, []}),
+                        [{Id, util:op(Electorate, Change)}|Acc]
+                end, [], get_ancestors(ConfId, State)).
+
+list_electorates(FromId, ToId, State) ->
+    util:range(list_electorates(ToId, State), fun ({Id, _}) -> Id =:= FromId end).
 
 get_electorate_diff(MotionId, Change, State) ->
     Old = get_electorate(get_motion(MotionId, State), State),
@@ -160,6 +175,14 @@ has_right_electorate(Motion, #{elect := #{current := ConfId}}) ->
             false
     end.
 
+needs_vote(MotionId, Node, State) ->
+    case util:lookup(State, [elect, MotionId]) of
+        {_, _, Votes} when is_map(Votes) ->
+            not util:has(Votes, Node);
+        _ ->
+            false
+    end.
+
 vote(MotionId, _Motion, Vote, State) ->
     Ballot = #{
       refs => MotionId,
@@ -179,38 +202,43 @@ handle_motion(Motion, Mover, State) ->
     MotionId = get_motion_id(Motion, State),
     State1 = maybe_save_motion(Motion, MotionId, State),
     State2 = maybe_save_pending(Motion, MotionId, State1),
-    State3 =
-        case util:lookup(State2, [elect, MotionId]) of
+    State3 = maybe_vote_stopped(Motion, MotionId, State2),
+    State4 =
+        case util:lookup(State3, [elect, MotionId]) of
             undefined ->
                 %% we didn't save, must have been predicated on an impossible electorate
-                resolve_motion(MotionId, Motion, Mover, {false, premise}, State2);
+                resolve_motion(MotionId, Motion, Mover, {false, premise}, State3);
             _ ->
                 %% we saved, we should maybe try to vote on it
+                NeedsVote = needs_vote(MotionId, node(), State3),
                 case util:get(Motion, fiat) of
-                    undefined ->
+                    undefined when NeedsVote ->
                         %% not a fiat, normal voting
-                        case lists:member(node(), get_electorate(Motion, State2)) of
+                        case lists:member(node(), get_electorate(Motion, State3)) of
                             true ->
                                 %% we are part of the motion's electorate, vote one way or another
-                                case has_right_electorate(Motion, State2) of
+                                case has_right_electorate(Motion, State3) of
                                     true ->
                                         %% the motion has the 'right' electorate
-                                        {Vote, S} = vote_on_motion(MotionId, Motion, Mover, State2),
+                                        {Vote, S} = vote_on_motion(MotionId, Motion, Mover, State3),
                                         vote(MotionId, Motion, Vote, S);
                                     false ->
                                         %% we don't agree about the electorate
-                                        vote(MotionId, Motion, {nay, electorate}, State2)
+                                        vote(MotionId, Motion, {nay, electorate}, State3)
                                 end;
                             false ->
                                 %% not part of the motion's electorate, our vote won't count anyway
-                                State2
+                                State3
                         end;
+                    undefined ->
+                        %% not a fiat, but we don't need to vote (probably we are stopped already)
+                        State3;
                     _ ->
                         %% its a fiat, no need to vote
-                        State2
+                        State3
                 end
         end,
-    adjudicate(Motion, MotionId, State3).
+    adjudicate(Motion, MotionId, State4).
 
 handle_ballot(Ballot, Mover, State) ->
     MotionId = get_motion_id(Ballot, State),
@@ -244,6 +272,7 @@ handle_ctrl(#{type := start, seed := Nodes}, Node, State) ->
 handle_ctrl(Ctrl = #{type := Type}, Node, State) ->
     %% we keep a list of nodes that need start / stop for each config task
     %% when we see a node successfully started / stopped, we update the list
+    %% the stop message also implies 'nay' on certain motions (see imply_votes)
     State1 =
         util:replace(State, [elect, pending, {conf, get_conf_id(Ctrl)}],
                      fun ({Start, Stop}) when Type =:= start ->
@@ -253,7 +282,8 @@ handle_ctrl(Ctrl = #{type := Type}, Node, State) ->
                          (Other) ->
                              Other
                      end),
-    State1#{response => ok}.
+    State2 = imply_votes(Ctrl, Node, State1),
+    State2#{response => ok}.
 
 handle_task(#{name := config}, Node, ConfId, State) ->
     case get_motion(ConfId, State) of
@@ -315,6 +345,53 @@ maybe_change_conf(#{vote := {yea, _}}, MotionId, State = #{elect := Elect}) ->
 maybe_change_conf(_, _, State) ->
     %% could be a fiat, in which case change will happen when decision is reflected
     %% otherwise we didn't accept the change
+    State.
+
+maybe_voted(MotionId, Node, Vote, State) ->
+    %% apply vote for node if the motion is open and the node hasn't yet voted
+    util:replace(State, [elect, MotionId],
+                 fun ({Kids, Motion, Votes}) when is_map(Votes) ->
+                         {Kids, Motion, util:ifndef(Votes, Node, Vote)};
+                     ({Kids, Motion, Other}) ->
+                         {Kids, Motion, Other}
+                 end).
+
+maybe_vote_stopped(Motion, MotionId, State) ->
+    %% if a new motion is not dependent on the current conf
+    %% vote 'nay' for every node in its conf that has been stopped since
+    ConfId = get_conf_id(Motion),
+    case util:lookup(State, [elect, current]) of
+        ConfId ->
+            %% it depends on the current conf, nothing to do
+            State;
+        Current ->
+            %% gather every node that has been stopped since the motion
+            %% that is, those that were supposed to be stopped and were
+            Stopped =
+                util:pair(fun ({{_, A}, {Id, B}}, Acc) ->
+                                  {_Start, Stop} = util:diff(A, B),
+                                  {_, Unstopped} = util:lookup(State, [elect, pending, {conf, Id}], {[], []}),
+                                  ordsets:union(Acc, lists:usort(Stop -- Unstopped))
+                          end, [], list_electorates(ConfId, Current, State)),
+            lists:foldl(fun (Node, S) ->
+                                maybe_voted(MotionId, Node, {nay, stopped}, S)
+                        end, State, Stopped)
+    end.
+
+imply_votes(Ctrl = #{type := stop}, Node, State) ->
+    %% the stop message implies 'nay' to any motions which:
+    %%  - are dependent on any previous conf
+    %%    i.e. child motions of every conf previous to the one referenced when stopped
+    %%  - the node did not vote on prior to its stop message
+    %% this must hold true not only for motions which we have seen so far on this node
+    %% but also for motions which we haven't seen yet that fit the above criteria
+    lists:foldl(
+      fun ({_, {Kids, _, _}}, S) ->
+              lists:foldl(fun (Kid, S1) ->
+                                  maybe_voted(Kid, Node, {nay, stopped}, S1)
+                          end, S, Kids)
+      end, State, get_predicates(get_conf(Ctrl, State), State));
+imply_votes(_, _, State) ->
     State.
 
 adjudicate(Ballot, MotionId, State = #{elect := Elect}) ->

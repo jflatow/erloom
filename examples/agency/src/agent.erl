@@ -39,29 +39,29 @@ handle_info(Info, State) ->
     State.
 
 handle_message(#{do := save}, _Node, true, State) ->
-    loom:maybe_reply(loom:save(State));
+    loom:save(State);
 handle_message(#{do := get_state}, _Node, true, State) ->
-    loom:maybe_reply(State, State);
+    State#{response => State};
 handle_message(#{do := emit}, _Node, true, State) ->
     loom:stitch_yarn(#{do => reply}, State);
 handle_message(#{do := reply}, _Node, true, State) ->
-    loom:maybe_reply(got_it, State);
+    State#{response => got_it};
 handle_message(#{type := start}, Node, true, State) ->
     io:format("~p started~n", [Node]),
-    loom:maybe_reply(State);
+    State;
 handle_message(#{type := stop}, Node, true, State) ->
     io:format("~p stopped~n", [Node]),
-    loom:maybe_reply(State);
+    State;
 handle_message(#{type := task, name := Name, kind := done}, Node, true, State) ->
     io:format("~p completed task ~p~n", [Node, Name]),
-    loom:maybe_reply(State);
+    State;
 handle_message(#{write := _}, _, true, State = #{wrote := Wrote}) ->
-    loom:maybe_reply(Wrote, State);
+    State#{response => Wrote};
 handle_message(Message, Node, true, State) ->
     io:format("~p new message: ~p~n", [Node, Message]),
-    loom:maybe_reply(State);
+    State;
 handle_message(_, _, false, State) ->
-    loom:maybe_reply(State).
+    State.
 
 vote_on_motion(Motion, Mover, State) ->
     io:format("~p vote on ~p from ~p ~n", [node(), Motion, Mover]),

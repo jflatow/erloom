@@ -174,7 +174,7 @@
          stitch_task/4,
          suture_task/4,
          make_motion/2,
-         maybe_chain/2]).
+         make_tether/2]).
 
 %% 'seed' (or equivalent) must be called before a loom can be used
 %% it is called only the first time the loom is *ever* used,
@@ -184,7 +184,7 @@ seed(Spec) ->
     seed(Spec, [node()]).
 
 seed(Spec, Nodes) ->
-    seed(Spec, Nodes, #{timeout => 3000}).
+    seed(Spec, Nodes, []).
 
 seed(Spec, Nodes, Opts) ->
     call(Spec, #{type => start, seed => Nodes}, Opts).
@@ -235,7 +235,7 @@ rpc(Node, Spec, Message) ->
     rpc(Node, Spec, Message, []).
 
 rpc(Node, Spec, Message, Opts) ->
-    {Timeout, Opts1} = util:default(Opts, timeout, 3000),
+    {Timeout, Opts1} = util:default(Opts, timeout, 30000),
     rpc:call(Node, loom, call, [Spec, Message, Opts1], Timeout).
 
 %% 'multirpc' and 'multircv' conveniently wrap calls to multiple nodes
@@ -268,9 +268,9 @@ deliver(Nodes, Spec, Message) ->
     deliver(Nodes, Spec, Message, []).
 
 deliver(Nodes, Spec, Message, Opts) ->
-    deliver(Nodes, Spec, Message, Opts, Nodes).
+    deliver(Nodes, Spec, Message, Opts, [], Nodes).
 
-deliver(Nodes, Spec, Message, Opts, Remaining) ->
+deliver(Nodes, Spec, Message, Opts, Tried, Remaining) ->
     %% NB: we can't be certain messages never reach a loom, so they should be idempotent
     Wrapped = util:get(Opts, wrapped, true),
     case util:draw(Remaining, util:get(Opts, pref, node())) of
@@ -282,25 +282,27 @@ deliver(Nodes, Spec, Message, Opts, Remaining) ->
                     Opts1 = Opts#{retry => {N - 1, T}},
                     receive after T -> deliver(Nodes, Spec, Message, Opts1) end;
                 _ when Wrapped ->
-                    {undefined, Spec, {error, {delivery, Nodes}}};
+                    {undefined, Spec, {error, {delivery, Tried}}};
                 _ ->
-                    {error, {delivery, Nodes}}
+                    {error, {delivery, Tried}}
             end;
         {Node, R1} ->
-            case rpc(Node, Spec, Message, Opts) of
+            Response = rpc(Node, Spec, Message, Opts),
+            T1 = util:set(Tried, Node, Response),
+            case Response of
                 {badrpc, _} ->
                     %% the message never even got to the loom
-                    deliver(Nodes, Spec, Message, Opts, R1);
+                    deliver(Nodes, Spec, Message, Opts, T1, R1);
                 {retry, _} ->
                     %% the loom didn't accept the message
-                    deliver(Nodes, Spec, Message, Opts, R1);
+                    deliver(Nodes, Spec, Message, Opts, T1, R1);
                 {wait, timeout} ->
                     %% delivery message shouldn't block: a timeout is a failure
-                    deliver(Nodes, Spec, Message, Opts, R1);
-                Response when Wrapped ->
+                    deliver(Nodes, Spec, Message, Opts, T1, R1);
+                _ when Wrapped ->
                     %% any other response from the loom is considered received
                     {Node, Spec, Response};
-                Response ->
+                _ ->
                     Response
             end
     end.
@@ -552,7 +554,7 @@ handle_builtin(Message = #{type := move}, Node, State) when Node =:= node() ->
     make_motion(Message, State);
 handle_builtin(Message = #{type := tether}, Node, State) when Node =:= node() ->
     %% its convenient to be able to push a node to move a chain
-    maybe_chain(Message, State);
+    make_tether(Message, State);
 
 handle_builtin(Message = #{type := task}, Node, State) ->
     %% task messages are for the surety to either retry or complete a task
@@ -568,13 +570,15 @@ handle_message(Message, Node, IsNew, State) ->
     %% for 'at most once', check if is new
     State1 = cancel_builtin(Message, Node, State),
     State2 = handle_builtin(Message, Node, State1),
-    Respond = fun () -> maybe_reply(State2) end,
-    callback(State2, {handle_message, 4}, [Message, Node, IsNew, State2], Respond).
+    State3 = callback(State2, {handle_message, 4}, [Message, Node, IsNew, State2], State2),
+    maybe_reply(State3).
 
 vote_on_motion(Motion, Mover, State) ->
     callback(State, {vote_on_motion, 3}, [Motion, Mover, State], {{yea, ok}, State}).
 
 motion_decided(Motion, Mover, Decision, State) ->
+    %% in general one should suture (not stitch) from 'motion_decided'
+    %% otherwise replay of emit could occur before the decision, causing re-emit
     callback(State, {motion_decided, 4}, [Motion, Mover, Decision, State], State).
 
 task_completed(Message = #{name := config}, Node, Result, State) ->
@@ -656,7 +660,7 @@ cmd(#{verb := remove, path := Path}, State) ->
     State2 = util:remove(State1, Path),
     State2#{response => ok};
 cmd(_, State) ->
-    State#{response => {error, unrecognized_command}}.
+    State.
 
 vsn(#{version := Version}, _State) ->
     Version;
@@ -720,5 +724,5 @@ suture_task(Name, Node, Task, State) ->
 make_motion(Motion, State) ->
     erloom_electorate:motion(Motion, State).
 
-maybe_chain(Change, State) ->
+make_tether(Change, State) ->
     erloom_electorate:tether(Change, State).
