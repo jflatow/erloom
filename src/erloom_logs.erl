@@ -163,7 +163,7 @@ replay(Fun, [Target|Stack], State = #{point := Point, front := Front}) ->
                 _ ->
                     %% target is contained in front
                     %% go after a node that's ahead, then try the whole thing again
-                    %% since we may have covered more ground than we intended
+                    %% since we may have covered more (or less) ground than we intended
                     [{Node, Range}|_] = maps:to_list(TP),
                     State1 = replay(Replay, Range, Node, State),
                     replay(Fun, [Target|Stack], State1)
@@ -176,6 +176,9 @@ replay(_, [], State) ->
     State.
 
 %% replay a single node range, accumulating into state
+%% NB: currently this is very expensive as it independently reads log files into memory
+%%     it can / will be optimized, but since the reader / writer have separate FDs
+%%     its possible that replay does not get the full requested range on the first try
 
 replay(Fun, {undefined, {BId, B}}, Node, State) ->
     replay(Fun, {{first_id(Node, State), undefined}, {BId, B}}, Node, State);
@@ -186,14 +189,16 @@ replay(Fun, {{AId, A}, {AId, B}}, Node, State) ->
                   fun ({{Before, _}, _}, S = #{point := #{Node := Mark}}) when {AId, Before} < Mark ->
                           %% point already got ahead of us, just skip
                           S;
-                      ({{Before, _} = Range, Data}, S = #{point := P}) ->
+                      ({{Before, _} = Range, {ok, Data}}, S = #{point := P}) ->
                           %% NB: we mark Before in case Fun decides to exit early
                           P1 = P#{Node => {AId, Before}},
                           S1 = S#{point => P1, locus => {{Node, AId}, Range}},
-                          Fun(binary_to_term(Data), Node, S1)
+                          Fun(binary_to_term(Data), Node, S1);
+                      ({_, {nil, _}}, S) ->
+                          %% skip nullified data
+                          S
                   end, State1, {A, B}),
-    %% NB: defmax in case After < B when B is defined, i.e. if log entries are nullified
-    State2#{point => Point#{Node => {AId, util:defmax(After, B)}}};
+    State2#{point => Point#{Node => {AId, After}}};
 replay(Fun, {{AId, A}, {BId, B}}, Node, State) when AId < BId ->
     IId = next_id({Node, AId}, State),
     State1 = replay(Fun, {{AId, A}, {AId, undefined}}, Node, State),

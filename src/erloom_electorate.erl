@@ -240,19 +240,10 @@ handle_motion(Motion, Mover, State) ->
         end,
     adjudicate(Motion, MotionId, State4).
 
-handle_ballot(Ballot, Mover, State) ->
+handle_ballot(Ballot, Node, State) ->
     MotionId = get_motion_id(Ballot, State),
-    State1 = maybe_save_ballot(Ballot, MotionId, Mover, State),
-    State2 =
-        case Mover of
-            Node when Node =:= node() ->
-                %% its ours, if the motion was a conf change, we might need to apply it
-                maybe_change_conf(Ballot, MotionId, State1);
-            _ ->
-                %% not ours, no need to commit anything
-                State1
-        end,
-    adjudicate(Ballot, MotionId, State2).
+    State1 = maybe_save_ballot(Ballot, MotionId, Node, State),
+    adjudicate(Ballot, MotionId, State1).
 
 handle_ratify(#{refs := MotionId}, Node, State) ->
     case get_motion(MotionId, State) of
@@ -332,20 +323,6 @@ maybe_save_pending(_Motion, _MotionId, State) ->
 maybe_drop_pending(Key, MotionId, State) ->
     State1 = util:accrue(State, [elect, pending, Key], {'-', [MotionId]}),
     util:sluice(State1, [elect, pending, Key], []).
-
-maybe_change_conf(#{vote := {yea, _}}, MotionId, State = #{elect := Elect}) ->
-    case util:get(Elect, MotionId) of
-        {_, #{kind := conf}, _} ->
-            %% the motion is a conf change, and we accepted it, so update current
-            State#{elect => Elect#{current => MotionId}};
-        _ ->
-            %% the motion is not a conf change, leave it
-            State
-    end;
-maybe_change_conf(_, _, State) ->
-    %% could be a fiat, in which case change will happen when decision is reflected
-    %% otherwise we didn't accept the change
-    State.
 
 maybe_voted(MotionId, Node, Vote, State) ->
     %% apply vote for node if the motion is open and the node hasn't yet voted
@@ -484,8 +461,10 @@ reflect_decision(MotionId, {Kids, Motion, _}, Decision, State = #{elect := Elect
                         reflect_decision(Kid, util:get(E, Kid), {false, premise}, S)
                 end, State3, Kids).
 
-vote_on_motion(_, #{kind := conf}, _, State) ->
-    {{yea, ok}, State};
+vote_on_motion(MotionId, #{kind := conf}, _, State) ->
+    %% as soon as we accept a conf change, we update our current (believed) conf
+    %% we won't be able to accept any alternative conf change now, only one that depends on this one
+    {{yea, ok}, util:modify(State, [elect, current], MotionId)};
 vote_on_motion(MotionId, #{kind := chain, path := Path, prior := Prior} = Motion, Mover, State) ->
     case erloom_chain:lookup(State, Path) of
         {_, _, _} ->
