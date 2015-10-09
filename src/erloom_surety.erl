@@ -71,14 +71,22 @@ complete_task(#{name := Name} = Message, Node, State) ->
 
 spawn_task(_, [{Node, _}|_], _) when Node =/= node() ->
     undefined;
-spawn_task(_, [{_, {{Fun, Arg}, Base}}|_], State) ->
+spawn_task(Name, [{_, {{F, Arg}, Base}}|_], State) ->
+    Timer = time:timer(),
+    Fun =
+        case erlang:fun_info(F, arity) of
+            {arity, 2} -> fun (_, A, S) -> F(A, S) end;
+            {arity, 3} -> F
+        end,
     Run =
-        fun Loop(A, S) ->
-                case catch Fun(A, S) of
-                    {retry, Wait} ->
+        fun Loop(N, A, S) ->
+                case catch Fun({N, Timer}, A, S) of
+                    {retry, Wait, Reason} ->
                         %% if the arg doesn't change there's no need to send a message
-                        receive after time:timeout(Wait) -> Loop(A, loom:state(S)) end;
-                    {retry, A1, Wait} ->
+                        %% give the user callback a chance to maybe log, or take action
+                        loom:task_continued(Name, Reason, {N, Timer}, A, S),
+                        receive after time:timeout(Wait) -> Loop(N + 1, A, loom:state(S)) end;
+                    {renew, A1, Wait, Reason} ->
                         %% if the arg changes we send a message to notify the loom
                         %% if we crash, we must either:
                         %%  1. try the previous arg again right away
@@ -87,7 +95,8 @@ spawn_task(_, [{_, {{Fun, Arg}, Base}}|_], State) ->
                         %% regardless, we can't avoid the possibility of repeating an arg
                         %% crashing is rare, all options have issues: do something simple (#2)
                         loom:call(S, Base#{type => task, kind => retry, value => A1}),
-                        receive after time:timeout(Wait) -> Loop(A1, loom:state(S)) end;
+                        loom:task_continued(Name, Reason, {N, Timer}, A, S),
+                        receive after time:timeout(Wait) -> Loop(N + 1, A1, loom:state(S)) end;
                     {done, Result} ->
                         %% when we are done, notify the loom so we can finish the task
                         loom:call(S, Base#{type => task, kind => done, value => Result});
@@ -96,7 +105,7 @@ spawn_task(_, [{_, {{Fun, Arg}, Base}}|_], State) ->
                         loom:call(S, Base#{type => task, kind => fail, value => Other})
                 end
         end,
-    spawn_link(fun () -> Run(Arg, State) end).
+    spawn_link(fun () -> Run(0, Arg, State) end).
 
 pause_tasks(State = #{tasks := Tasks}) ->
     %% silently exit tasks, and mark them all as unlaunched

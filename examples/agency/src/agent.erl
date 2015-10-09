@@ -8,7 +8,9 @@
          handle_info/2,
          handle_message/4,
          vote_on_motion/3,
-         motion_decided/4]).
+         motion_decided/4,
+         task_completed/4,
+         task_continued/5]).
 
 home({agent, Name}) ->
     filename:join([var, url:esc(node()), Name]).
@@ -31,11 +33,11 @@ write_through(_Message, _N, _State) ->
     {1, infinity}.
 
 handle_idle(State) ->
-    io:format("idling~n"),
+    io:format("~p idling~n", [node()]),
     loom:sleep(State).
 
 handle_info(Info, State) ->
-    io:format("info: ~p~n", [Info]),
+    io:format("~p info: ~256p~n", [node(), Info]),
     State.
 
 handle_message(#{do := save}, _Node, true, State) ->
@@ -52,19 +54,16 @@ handle_message(#{type := start}, Node, true, State) ->
 handle_message(#{type := stop}, Node, true, State) ->
     io:format("~p stopped~n", [Node]),
     State;
-handle_message(#{type := task, name := Name, kind := done}, Node, true, State) ->
-    io:format("~p completed task ~p~n", [Node, Name]),
-    State;
 handle_message(#{write := _}, _, true, State = #{wrote := Wrote}) ->
     State#{response => Wrote};
 handle_message(Message, Node, true, State) ->
-    io:format("~p new message: ~p~n", [Node, Message]),
+    io:format("~p new message: ~256p~n", [Node, Message]),
     State;
 handle_message(_, _, false, State) ->
     State.
 
 vote_on_motion(Motion, Mover, State) ->
-    io:format("~p vote on ~p from ~p ~n", [node(), Motion, Mover]),
+    io:format("~p vote on ~256p from ~256p ~n", [node(), Motion, Mover]),
     {{yea, ok}, State}.
 
 motion_decided(#{kind := chain, path := xyz}, Mover, {true, _}, State) when Mover =:= node() ->
@@ -73,5 +72,13 @@ motion_decided(#{kind := chain, path := xyz}, Mover, {true, _}, State) when Move
     State1 = loom:suture_yarn(Modify, State),
     State1#{response => [Mover, 'did pass chain']};
 motion_decided(#{yarn := Yarn}, Mover, Decision, State) ->
-    io:format("~p decided ~p for ~p from ~p~n", [node(), Decision, Yarn, Mover]),
+    io:format("~p decided ~256p for ~256p from ~256p~n", [node(), Decision, Yarn, Mover]),
     State.
+
+task_completed(#{name := Name}, Node, Result, State) ->
+    io:format("~p completed task ~256p ~256p~n", [Node, Name, Result]),
+    State.
+
+task_continued(Name, Reason, {N, T}, _Arg, _State) ->
+    Secs = time:timer_elapsed(T) / 1000,
+    io:format("[~B @ ~.3fs] ~256p: ~256p~n", [N, Secs, Name, Reason]).

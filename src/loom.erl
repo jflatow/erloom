@@ -95,6 +95,7 @@
 -callback vote_on_motion(motion(), node(), state()) -> {vote(), state()}.
 -callback motion_decided(motion(), node(), decision(), state()) -> state().
 -callback task_completed(message(), node(), term(), state()) -> state().
+-callback task_continued(term(), term(), term(), tuple(), state()) -> any().
 -callback check_node(node(), pos_integer(), state()) -> state().
 
 -optional_callbacks([find/1,
@@ -111,6 +112,7 @@
                      vote_on_motion/3,
                      motion_decided/4,
                      task_completed/4,
+                     task_continued/5,
                      check_node/3]).
 
 -export([seed/1,
@@ -159,6 +161,7 @@
          vote_on_motion/3,
          motion_decided/4,
          task_completed/4,
+         task_continued/5,
          check_node/3]).
 
 -export([callback/3,
@@ -586,6 +589,9 @@ task_completed(Message = #{name := config}, Node, Result, State) ->
     callback(State1, {task_completed, 4}, [Message, Node, Result, State1], State1);
 task_completed(Message, Node, Result, State) ->
     callback(State, {task_completed, 4}, [Message, Node, Result, State], State).
+
+task_continued(Name, Reason, Clock, Arg, State) ->
+    callback(State, {task_continued, 5}, [Name, Reason, Clock, Arg, State], ok).
 
 check_node(Node, Unanswered, State) ->
     callback(State, {check_node, 3}, [Node, Unanswered, State], State).

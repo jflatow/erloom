@@ -584,8 +584,8 @@ do_config(ConfId, State = #{spec := Spec}) ->
             case {Start -- util:keys(A, ok), Stop -- util:keys(B, ok)} of
                 {[], []} ->
                     {done, ConfId};
-                {_, _} ->
-                    {retry, {10, seconds}}
+                Pending ->
+                    {retry, {10, seconds}, {wait, Pending}}
             end
     end.
 
