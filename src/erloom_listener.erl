@@ -140,12 +140,12 @@ react(ready, Other, State) ->
 react(busy, {worker_done, NewState}, State = #{status := awake, front := Front}) ->
     %% if we are awake, listener is the authority on where all the logs are, except our own
     Front1 = maps:merge(Front, maps:with([node()], maps:get(front, NewState))),
-    State1 = maps:merge(NewState, maps:with([status, opts, edges], State)),
+    State1 = maps:merge(NewState, maps:with([status, opts, logs, edges], State)),
     State2 = State1#{front => Front1},
     listen(catchup, State2);
 react(busy, {worker_done, NewState}, State = #{status := _, front := Front}) ->
     %% if we are not awake yet, listener is the authority on all logs, including our own
-    State1 = maps:merge(NewState, maps:with([status, opts, edges], State)),
+    State1 = maps:merge(NewState, maps:with([status, opts, logs, edges], State)),
     State2 = State1#{front => Front},
     listen(catchup, check_recovery(State2));
 react(busy, {sync_logs, Packet}, State) ->
