@@ -176,9 +176,6 @@ replay(_, [], State) ->
     State.
 
 %% replay a single node range, accumulating into state
-%% NB: currently this is very expensive as it independently reads log files into memory
-%%     it can / will be optimized, but since the reader / writer have separate FDs
-%%     its possible that replay does not get the full requested range on the first try
 
 replay(Fun, {undefined, {BId, B}}, Node, State) ->
     replay(Fun, {{first_id(Node, State), undefined}, {BId, B}}, Node, State);
@@ -197,7 +194,7 @@ replay(Fun, {{AId, A}, {AId, B}}, Node, State) ->
                       ({_, {nil, _}}, S) ->
                           %% skip nullified data
                           S
-                  end, State1, {A, B}),
+                  end, State1, {A, B}, #{rash => true}),
     State2#{point => Point#{Node => {AId, After}}};
 replay(Fun, {{AId, A}, {BId, B}}, Node, State) when AId < BId ->
     IId = next_id({Node, AId}, State),
@@ -210,11 +207,11 @@ slice(Limit, {undefined, {BId, B}}, Node, State) ->
     slice(Limit, {{first_id(Node, State), undefined}, {BId, B}}, Node, State);
 slice(Limit, {{AId, A}, {AId, B}}, Node, State) ->
     {Log, State1} = obtain({Node, AId}, State),
-    EntryList = log:range(Log, {A, B}, #{limit => Limit}),
+    EntryList = log:range(Log, {A, B}, #{limit => Limit, rash => true}),
     {{Node, AId}, EntryList, State1};
 slice(Limit, {{AId, A}, {BId, B}}, Node, State) when AId < BId ->
     {Log, State1} = obtain({Node, AId}, State),
-    case log:range(Log, {A, undefined}, #{limit => Limit}) of
+    case log:range(Log, {A, undefined}, #{limit => Limit, rash => true}) of
         [] ->
             IId = next_id({Node, AId}, State1),
             slice(Limit, {{IId, undefined}, {BId, B}}, Node, State1);
