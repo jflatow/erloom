@@ -492,7 +492,7 @@ resolve_motion(MotionId, #{kind := chain, path := Path} = Motion, Mover, Decisio
         case Decision of
             {true, _} ->
                 %% passed a motion to chain: treat as a command now
-                loom:cmd(Motion#{version => MotionId}, State2);
+                loom:command(Motion#{version => MotionId}, State2);
             _ ->
                 %% failed to chain
                 State2#{response => {error, Decision}}

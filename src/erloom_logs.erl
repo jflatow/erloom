@@ -125,11 +125,19 @@ fold(Fun, Acc, State) ->
     fold(Fun, Acc, {undefined, undefined}, State).
 
 fold(Fun, Acc, {Start, Stop}, State = #{logs := _, front := Front}) ->
-    State1 = State#{acc => Acc, point => util:def(Start, #{})},
-    State2 = replay(fun (Message, _Node, S = #{acc := A, locus := L}) ->
-                            S#{acc => Fun(Message, L, A)}
-                    end, [util:def(Stop, Front)], State1),
-    util:get(State2, acc);
+    try
+        State1 = State#{acc => Acc, point => util:def(Start, #{})},
+        State2 = replay(fun (Message, _Node, S = #{acc := A, locus := L}) ->
+                                S#{acc => Fun(Message, L, A)}
+                        end, [util:def(Stop, Front)], State1),
+        util:get(State2, acc)
+    catch
+        %% fold only as far as we can go
+        throw:{unreachable, _Target, S} ->
+            util:get(S, acc);
+        throw:{unsupported, _Vsn, S} ->
+            util:get(S, acc)
+    end;
 fold(Fun, Acc, Range, Home) ->
     fold(Fun, Acc, Range, load_logs(#{home => Home})).
 
@@ -149,7 +157,9 @@ replay(Fun, [Target|Stack], State = #{point := Point, front := Front}) ->
                 case loom:unmet_needs(Message, S) of
                     nil ->
                         Fun(Message, Node, S);
-                    Needs ->
+                    {vsn, Vsn} ->
+                        throw({unsupported, Vsn, S});
+                    {deps, Needs} ->
                         replay(Fun, [Needs, Target], S)
                 end
         end,

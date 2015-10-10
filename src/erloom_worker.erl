@@ -73,7 +73,9 @@ replay_logs(State = #{front := Front}) ->
         %% if we can't go any further, try to resolve the problem quickly
         %% in the meantime just return as far as we get
         throw:{unreachable, Target, State1} ->
-            erloom_sync:maybe_pull(Target, State1)
+            erloom_sync:maybe_pull(Target, State1);
+        throw:{unsupported, Vsn, State1} ->
+            loom:needs_upgrade(Vsn, State1)
     end.
 
 write_through(Message, State = #{peers := Peers}) ->

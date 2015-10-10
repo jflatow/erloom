@@ -1,7 +1,8 @@
 -module(agent).
 
 -behavior(loom).
--export([home/1,
+-export([vsn/1,
+         home/1,
          opts/1,
          write_through/3,
          handle_idle/1,
@@ -10,7 +11,11 @@
          vote_on_motion/3,
          motion_decided/4,
          task_completed/4,
-         task_continued/5]).
+         task_continued/5,
+         needs_upgrade/2]).
+
+vsn(_) ->
+    #{agent => {2, 0, 0}}.
 
 home({agent, Name}) ->
     filename:join([var, url:esc(node()), Name]).
@@ -82,3 +87,7 @@ task_completed(#{name := Name}, Node, Result, State) ->
 task_continued(Name, Reason, {N, T}, _Arg, _State) ->
     Secs = time:timer_elapsed(T) / 1000,
     io:format("[~B @ ~.3fs] ~256p: ~256p~n", [N, Secs, Name, Reason]).
+
+needs_upgrade(Vsn, State) ->
+    io:format("~p needs upgrade to vsn ~256p~n", [node(), Vsn]),
+    State.

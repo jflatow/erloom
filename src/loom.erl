@@ -21,7 +21,10 @@
             sync_interval => pos_integer(),
             unanswered_max => pos_integer()
            }.
+
+-type vsn() :: #{atom() => tuple() | undefined}.
 -type message() :: #{
+               vsn => vsn(),
                deps => erloom:edge(),
                refs => erloom:loci(),
                type => start | stop | motion | ballot | ratify | move | tether | fence | task | command | atom(),
@@ -34,6 +37,8 @@
              worker => pid(),
              active => boolean(),                             %% owned by worker
              status => awake | waking | waiting | recovering, %% owned by listener
+             vsn => vsn(),                                    %% vsn of the current code
+             vsns => #{node() => vsn()},                      %% vsn info at point
              spec => spec(),
              home => home(),
              opts => opts(),
@@ -76,6 +81,7 @@
                value => term()
               }.
 
+-callback vsn(spec()) -> vsn().
 -callback find(spec()) -> [node()].
 -callback proc(spec()) -> pid().
 -callback home(spec()) -> home().
@@ -97,8 +103,10 @@
 -callback task_completed(message(), node(), term(), state()) -> state().
 -callback task_continued(term(), term(), term(), tuple(), state()) -> any().
 -callback check_node(node(), pos_integer(), state()) -> state().
+-callback needs_upgrade(vsn(), state()) -> state().
 
--optional_callbacks([find/1,
+-optional_callbacks([vsn/1,
+                     find/1,
                      proc/1,
                      opts/1,
                      keep/1,
@@ -113,7 +121,8 @@
                      motion_decided/4,
                      task_completed/4,
                      task_continued/5,
-                     check_node/3]).
+                     check_node/3,
+                     needs_upgrade/2]).
 
 -export([seed/1,
          seed/2,
@@ -133,7 +142,8 @@
          deliver/3,
          deliver/4]).
 
--export([find/1,
+-export([vsn/1,
+         find/1,
          proc/1,
          home/1,
          opts/1,
@@ -162,15 +172,16 @@
          motion_decided/4,
          task_completed/4,
          task_continued/5,
-         check_node/3]).
+         check_node/3,
+         needs_upgrade/2]).
 
 -export([callback/3,
          callback/4]).
 
 -export([change_peers/2]).
 
--spec cmd(command(), state()) -> state().
--export([cmd/2]).
+-spec command(command(), state()) -> state().
+-export([command/2]).
 
 -export([stitch_yarn/2,
          suture_yarn/2,
@@ -310,6 +321,13 @@ deliver(Nodes, Spec, Message, Opts, Tried, Remaining) ->
             end
     end.
 
+%% 'vsn' tells the version of the code
+%% looms will refuse to process messages if they don't have a high enough vsn
+%% vsns are like edges, lacking any part of required vsn will require an upgrade
+
+vsn(Spec) ->
+    maps:merge(callback(Spec, {vsn, 1}, [Spec], #{}), #{}).
+
 %% 'find' defines the mechanism for locating nodes for a spec
 %% when it's unknown which nodes a loom is running on, this is where to look
 %% can block for an arbitrarily long time, and may return an empty list
@@ -357,7 +375,7 @@ keep(State) ->
     %%  the values tell if the node was counted during the last write through
     %% emits is permanent: messages yet to emit from the current state
     %% tasks is permanent (mostly): tasks which are currently running
-    Builtins = maps:with([active, edges, point, locus, peers, emits, elect, tasks], State),
+    Builtins = maps:with([active, vsns, edges, point, locus, peers, emits, elect, tasks], State),
     maps:merge(Builtins, callback(State, {keep, 1}, [State], #{})).
 
 save(State) ->
@@ -380,7 +398,7 @@ load(State = #{home := _}) ->
      },
     Kept = maps:merge(Defaults, kept(State)),
     State1 = erloom_logs:load(State),
-    maps:merge(Kept, State1);
+    maps:merge(Kept, State1#{vsn => vsn(State1)});
 load(State = #{spec := Spec}) ->
     load(State#{home => home(Spec), opts => opts(Spec)}).
 
@@ -395,7 +413,8 @@ waken(State) ->
     %% called on listener once we've caught up to tip, before we accept messages
     %% we were previously not awake, give a chance to liven the state
     State1 = erloom_surety:restart_tasks(State#{status => awake}),
-    callback(State1, {waken, 1}, [State1], State1).
+    State2 = maybe_upgrade(State1),
+    callback(State2, {waken, 1}, [State2], State2).
 
 sleep(State) ->
     State1 = save(State),
@@ -419,6 +438,17 @@ stop(Node, State) when Node =:= node() ->
     State#{active => false};
 stop(_, State) ->
     State.
+
+maybe_upgrade(State = #{vsn := Vsn}) ->
+    %% if the vsn of the code is greater than ours, we should emit a new vsn
+    %% noone with a vsn less than ours will be able to process past this point on our log
+    %% NB: this happens during waken, so we compare to the vsn we think we are at tip
+    case erloom:edge_delta(Vsn, util:lookup(State, [vsns, node()], #{})) of
+        Delta when map_size(Delta) > 0 ->
+            loom:stitch_yarn(#{type => upgrade, yarn => upgrade, vsn => Vsn}, State);
+        _ ->
+            State
+    end.
 
 defer_reply(Name, State = #{reply := Replies}) ->
     %% defer the default reply, if any, to name
@@ -484,15 +514,32 @@ max_deps(Message, State) ->
     %% this is the strongest set of deps we can possibly have in this context
     Message#{deps => after_point(State)}.
 
-unmet_needs(Message, #{point := Point}) ->
-    Deps = util:get(Message, deps, #{}),
-    Refs = util:get(Message, refs, []),
-    Needs = erloom:edge_hull(Deps, erloom:loci_after(Refs)),
-    case erloom:edge_delta(Needs, Point) of
+meets_vsn(#{vsn := Vsn}, #{vsn := any}) ->
+    {true, Vsn};
+meets_vsn(#{vsn := Vsn}, #{vsn := V}) ->
+    case erloom:edge_delta(Vsn, V) of
         Delta when map_size(Delta) > 0 ->
-            erloom:delta_upper(Delta);
+            {false, erloom:delta_upper(Delta)};
         _ ->
-            nil
+            {true, Vsn}
+    end;
+meets_vsn(_, _) ->
+    {true, #{}}.
+
+unmet_needs(Message, State = #{point := Point}) ->
+    case meets_vsn(Message, State) of
+        {true, _} ->
+            Deps = util:get(Message, deps, #{}),
+            Refs = util:get(Message, refs, []),
+            Needs = erloom:edge_hull(Deps, erloom:loci_after(Refs)),
+            case erloom:edge_delta(Needs, Point) of
+                Delta when map_size(Delta) > 0 ->
+                    {deps, erloom:delta_upper(Delta)};
+                _ ->
+                    nil
+            end;
+        {false, Vsn} ->
+            {vsn, Vsn}
     end.
 
 ready_to_accept(#{type := start}, #{status := S}) when S =:= waiting; S =:= awake ->
@@ -508,17 +555,22 @@ ready_to_accept(_Message, #{status := Status}) ->
 
 verify_message(Message, State) ->
     %% should we even accept the message?
-    %% at a minimum, we must be ready to accept, and any dependencies must be met
+    %% at a minimum:
+    %%   - we must be ready to accept
+    %%   - we must support vsn, if specified
+    %%   - any dependencies must be met
     case ready_to_accept(Message, State) of
         {true, _} ->
             case unmet_needs(Message, State) of
                 nil ->
                     callback(State, {verify_message, 2}, [Message, State], {ok, Message, State});
-                Deps ->
+                {vsn, Vsn} ->
+                    {incapable, Vsn, State};
+                {deps, Deps} ->
                     {missing, Deps, State}
             end;
-        {false, Status} ->
-            {retry, Status, State}
+        {false, Reason} ->
+            {retry, Reason, State}
     end.
 
 write_through(Message, N, State) ->
@@ -539,6 +591,9 @@ cancel_builtin(#{yarn := Yarn}, Node, State) when Node =:= node() ->
     util:remove(State, [emits, {node(), Yarn}]);
 cancel_builtin(_, _, State) ->
     State.
+
+handle_builtin(#{type := upgrade, vsn := Vsn}, Node, State) ->
+    util:modify(State, [vsns, Node], Vsn);
 
 handle_builtin(Message = #{type := start}, Node, State) ->
     erloom_electorate:handle_ctrl(Message, Node, start(Node, State));
@@ -563,7 +618,7 @@ handle_builtin(Message = #{type := task}, Node, State) ->
     %% task messages are for the surety to either retry or complete a task
     erloom_surety:handle_task(Message, Node, State);
 handle_builtin(Message = #{type := command}, _Node, State) ->
-    cmd(Message, State);
+    command(Message, State);
 handle_builtin(_Message, _Node, State) ->
     State.
 
@@ -595,6 +650,9 @@ task_continued(Name, Reason, Clock, Arg, State) ->
 
 check_node(Node, Unanswered, State) ->
     callback(State, {check_node, 3}, [Node, Unanswered, State], State).
+
+needs_upgrade(Vsn, State) ->
+    callback(State, {needs_upgrade, 2}, [Vsn, State], State).
 
 callback(#{spec := Spec}, FA, Args) ->
     callback(Spec, FA, Args);
@@ -630,47 +688,47 @@ change_peers({'-', Nodes}, State) ->
 change_peers({'=', Nodes}, State) ->
     change_peers({'+', Nodes}, State#{peers => #{}}).
 
-cmd(#{verb := lookup, path := Path, kind := probe}, State) ->
+command(#{verb := lookup, path := Path, kind := probe}, State) ->
     case util:lookup(State, [elect, pending, {chain, Path}]) of
         undefined ->
             State#{response => {ok, erloom_chain:value(State, Path)}};
         MotionId ->
             State#{response => {wait, MotionId}}
     end;
-cmd(#{verb := lookup, path := Path, kind := chain}, State) ->
+command(#{verb := lookup, path := Path, kind := chain}, State) ->
     State#{response => {ok, erloom_chain:value(State, Path)}};
-cmd(#{verb := lookup, path := Path}, State) ->
+command(#{verb := lookup, path := Path}, State) ->
     State#{response => {ok, util:lookup(State, Path)}};
-cmd(#{verb := modify, path := Path, value := Value, kind := chain} = Command, State) ->
+command(#{verb := modify, path := Path, value := Value, kind := chain} = Command, State) ->
     State1 = State#{former => erloom_chain:lookup(State, Path)},
-    State2 = erloom_chain:modify(State1, Path, {Value, vsn(Command, State)}),
+    State2 = erloom_chain:modify(State1, Path, {Value, version(Command, State)}),
     State2#{response => {ok, Value}};
-cmd(#{verb := modify, path := Path, value := Value}, State) ->
+command(#{verb := modify, path := Path, value := Value}, State) ->
     State1 = State#{former => util:lookup(State, Path)},
     State2 = util:modify(State1, Path, Value),
     State2#{response => {ok, Value}};
-cmd(#{verb := accrue, path := Path, value := Value, kind := chain} = Command, State) ->
+command(#{verb := accrue, path := Path, value := Value, kind := chain} = Command, State) ->
     State1 = State#{former => erloom_chain:lookup(State, Path)},
-    State2 = erloom_chain:accrue(State1, Path, {Value, vsn(Command, State)}),
+    State2 = erloom_chain:accrue(State1, Path, {Value, version(Command, State)}),
     State2#{response => {ok, erloom_chain:value(State2, Path)}};
-cmd(#{verb := accrue, path := Path, value := Value}, State) ->
+command(#{verb := accrue, path := Path, value := Value}, State) ->
     State1 = State#{former => util:lookup(State, Path)},
     State2 = util:accrue(State1, Path, Value),
     State2#{response => {ok, util:lookup(State2, Path)}};
-cmd(#{verb := remove, path := Path, kind := chain}, State) ->
+command(#{verb := remove, path := Path, kind := chain}, State) ->
     State1 = State#{former => erloom_chain:lookup(State, Path)},
     State2 = util:remove(State1, Path),
     State2#{response => ok};
-cmd(#{verb := remove, path := Path}, State) ->
+command(#{verb := remove, path := Path}, State) ->
     State1 = State#{former => util:lookup(State, Path)},
     State2 = util:remove(State1, Path),
     State2#{response => ok};
-cmd(_, State) ->
+command(_, State) ->
     State.
 
-vsn(#{version := Version}, _State) ->
+version(#{version := Version}, _State) ->
     Version;
-vsn(_, State) ->
+version(_, State) ->
     after_locus(State).
 
 %% Yarns serve 3 purposes:

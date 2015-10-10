@@ -117,6 +117,11 @@ react(ready, {new_message, Message, Reply}, State) ->
             work_on({new_message, Message1, Reply}, State1);
         {ok, Message1, State1 = #{status := waiting}} ->
             work_on({new_message, Message1, Reply}, loom:waken(State1));
+        {incapable, Vsn, State1} ->
+            %% we don't have the required code vsn to process the message
+            State2 = loom:needs_upgrade(Vsn, State1),
+            Reply({retry, {incapable, Vsn}}),
+            listen(ready, State2);
         {missing, Edge, State1} ->
             %% point could be behind front, or front could be missing entries
             %% but point was already pushed as far forward as possible before we became ready
