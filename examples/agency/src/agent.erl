@@ -23,6 +23,7 @@ home({agent, Name}) ->
 opts({agent, _}) ->
     #{
       idle_timeout => time:timeout({5, minutes}),
+      wipe_timeout => time:timeout({5, seconds}),
       sync_interval => 3000 + random:uniform(3000),
       sync_push_prob => 0.5,
       unanswered_max => 1
@@ -50,7 +51,7 @@ handle_message(#{do := save}, _Node, true, State) ->
 handle_message(#{do := get_state}, _Node, true, State) ->
     State#{response => State};
 handle_message(#{do := emit}, _Node, true, State) ->
-    loom:stitch_yarn(#{do => reply}, State);
+    loom:stitch_yarn(#{do => reply}, util:delete(State, response));
 handle_message(#{do := reply}, _Node, true, State) ->
     State#{response => got_it};
 handle_message(#{type := start}, Node, true, State) ->

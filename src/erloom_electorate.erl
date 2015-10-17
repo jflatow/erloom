@@ -590,9 +590,10 @@ do_config(ConfId, State = #{spec := Spec}) ->
     end.
 
 done_config(ConfId, Change, Node, State) ->
-    %% we *remove* peers after the task completes (i.e. after nodes are stopped)
-    %% otherwise its possible a node being stopped won't receive its start before being removed
-    %% in that case it will be impossible to stop as it will reject everything except the start
+    %% we *remove* peers after the task completes (i.e. after nodes are successfully stopped)
+    %% otherwise the peer group may stop syncing with the node too early and deadlock the task
+    %% e.g. if a node being stopped is also recovering, and hasn't even seen its own start
+    %% if we stop syncing, it will reject everything until start, including the stop message
     {_, Remove} = get_electorate_diff(ConfId, Change, State),
     State1 = util:remove(State, [elect, pending, {conf, ConfId}]),
     State2 = loom:change_peers({'-', Remove}, State1),

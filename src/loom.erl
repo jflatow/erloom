@@ -17,6 +17,7 @@
 -type opts() :: #{
             idle_elapsed => non_neg_integer(),
             idle_timeout => non_neg_integer() | infinity,
+            wipe_timeout => non_neg_integer(),
             sync_initial => non_neg_integer(),
             sync_interval => pos_integer(),
             unanswered_max => pos_integer()
@@ -156,6 +157,7 @@
          sleep/1,
          start/2,
          stop/2,
+         wipe/1,
          after_locus/1,
          after_point/1,
          defer_reply/2,
@@ -351,6 +353,7 @@ opts(Spec) ->
     Defaults = #{
       idle_elapsed => 0,
       idle_timeout => infinity,
+      wipe_timeout => time:timeout({30, minutes}),
       sync_initial => time:timer(),
       sync_interval => 60000 + random:uniform(10000), %% stagger for efficiency
       sync_log_limit => 1000,
@@ -439,6 +442,13 @@ stop(Node, State) when Node =:= node() ->
 stop(_, State) ->
     State.
 
+wipe(#{home := Home}) ->
+    %% when a node is stopped it doesn't idle, it wipes to reclaim disk space
+    %% there's a very small possibility that an underinformed node tries to restore us
+    %% that's ok, eventually we'll either wipe or get started again
+    ok = path:rmrf(Home),
+    exit(wiped).
+
 maybe_upgrade(State = #{vsn := Vsn}) ->
     %% if the vsn of the code is greater than ours, we should emit a new vsn
     %% noone with a vsn less than ours will be able to process past this point on our log
@@ -514,15 +524,17 @@ max_deps(Message, State) ->
     %% this is the strongest set of deps we can possibly have in this context
     Message#{deps => after_point(State)}.
 
-meets_vsn(#{vsn := Vsn}, #{vsn := any}) ->
-    {true, Vsn};
 meets_vsn(#{vsn := Vsn}, #{vsn := V}) ->
     case erloom:edge_delta(Vsn, V) of
         Delta when map_size(Delta) > 0 ->
+            %% false: only return the parts that need to be upgraded
             {false, erloom:delta_upper(Delta)};
         _ ->
+            %% true: return the version that was met (not used anywhere)
             {true, Vsn}
     end;
+meets_vsn(#{vsn := Vsn}, _) ->
+    {true, Vsn};
 meets_vsn(_, _) ->
     {true, #{}}.
 
@@ -531,8 +543,8 @@ unmet_needs(Message, State = #{point := Point}) ->
         {true, _} ->
             Deps = util:get(Message, deps, #{}),
             Refs = util:get(Message, refs, []),
-            Needs = erloom:edge_hull(Deps, erloom:loci_after(Refs)),
-            case erloom:edge_delta(Needs, Point) of
+            All = erloom:edge_hull(Deps, erloom:loci_after(Refs)),
+            case erloom:edge_delta(All, Point) of
                 Delta when map_size(Delta) > 0 ->
                     {deps, erloom:delta_upper(Delta)};
                 _ ->
@@ -620,7 +632,7 @@ handle_builtin(Message = #{type := task}, Node, State) ->
 handle_builtin(Message = #{type := command}, _Node, State) ->
     command(Message, State);
 handle_builtin(_Message, _Node, State) ->
-    State.
+    State#{response => ok}.
 
 handle_message(Message, Node, IsNew, State) ->
     %% called to transform state for every message on every node

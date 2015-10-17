@@ -16,6 +16,13 @@ do_push(Entries, State = #{peers := Peers}) ->
                       send_sync(Node, #{entries => Entries}, S)
               end, State, Peers).
 
+maybe_push(State = #{status := Status}) when Status =/= awake ->
+    %% do not push if we are not awake, otherwise we could push to very old peers
+    %% if we push to old peers its fine except we might never reclaim the disk space
+    %% NB: so recovering nodes can't fill each other in until they completely recover
+    %%     if *all* nodes are recovering they can never fully recover (automatically)
+    %%     even if together they have a complete set of logs
+    State;
 maybe_push(State = #{edges := Edges, front := Front, peers := Peers, opts := Opts}) ->
     %% send sync to any peers we think we are ahead of, or not at all
     %% we also randomly sync regardless, in case the node got replaced

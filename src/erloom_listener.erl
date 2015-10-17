@@ -41,7 +41,7 @@ listen(catchup, State) ->
     %% dont emit or start tasks as we may have already done it
     replay_logs(loom:init(State));
 
-listen(ready, State = #{opts := Opts, active := Active, tasks := Tasks}) ->
+listen(ready, State = #{opts := Opts, active := Active}) ->
     %% syncing happens when we realize we are missing data
     %% or every so often, as long as we think we're ahead (i.e. retry interval)
     %% idling can only be handled by the listener,
@@ -50,6 +50,7 @@ listen(ready, State = #{opts := Opts, active := Active, tasks := Tasks}) ->
     %%     if our peers are inaccessible, we could stay alive... maybe we will
     #{idle_elapsed := IdleElapsed,
       idle_timeout := IdleTimeout,
+      wipe_timeout := WipeTimeout,
       sync_initial := SyncInitial,
       sync_interval := SyncInterval} = Opts,
     SyncElapsed = time:timer_elapsed(SyncInitial),
@@ -61,6 +62,7 @@ listen(ready, State = #{opts := Opts, active := Active, tasks := Tasks}) ->
             heard(ready, Any, State)
     after
         Timeout ->
+            NTasks = erloom_surety:tasks_remaining(node(), State),
             State1 =
                 case SyncElapsed + Timeout of
                     E1 when E1 >= SyncInterval ->
@@ -70,10 +72,10 @@ listen(ready, State = #{opts := Opts, active := Active, tasks := Tasks}) ->
                 end,
             State2 =
                 case IdleElapsed + Timeout of
-                    _ when not Active, map_size(Tasks) =:= 0 ->
-                        loom:sleep(State1);
-                    E2 when E2 >= IdleTimeout, map_size(Tasks) =:= 0 ->
+                    E2 when E2 >= IdleTimeout, NTasks =:= 0, Active ->
                         loom:handle_idle(util:modify(State1, [opts, idle_elapsed], 0));
+                    E2 when E2 >= WipeTimeout, NTasks =:= 0, not Active ->
+                        loom:wipe(State1);
                     E2 ->
                         util:modify(State1, [opts, idle_elapsed], E2)
                 end,

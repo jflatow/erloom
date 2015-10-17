@@ -159,8 +159,8 @@ replay(Fun, [Target|Stack], State = #{point := Point, front := Front}) ->
                         Fun(Message, Node, S);
                     {vsn, Vsn} ->
                         throw({unsupported, Vsn, S});
-                    {deps, Needs} ->
-                        replay(Fun, [Needs, Target], S)
+                    {deps, Deps} ->
+                        replay(Fun, [Deps, Target], S)
                 end
         end,
     case erloom:edge_delta(Target, Point) of

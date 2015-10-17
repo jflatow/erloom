@@ -4,7 +4,8 @@
          handle_task/3,
          pause_tasks/1,
          launch_tasks/1,
-         restart_tasks/1]).
+         restart_tasks/1,
+         tasks_remaining/2]).
 
 task(Base = #{name := Name}, Node, Task, State) ->
     %% just insert into the table, it gets run once tasks are launched
@@ -135,3 +136,12 @@ restart_tasks(State = #{tasks := Tasks}) ->
     %% NB: we don't pause and launch, as the Pids might be stale (though not likely)
     Tasks1 = util:map(Tasks, fun ({_, Stack}) -> {undefined, Stack} end),
     launch_tasks(State#{tasks => Tasks1}).
+
+tasks_remaining(Node, #{tasks := Tasks}) ->
+    maps:fold(fun (_, {_, Stack}, Acc) ->
+                      lists:foldl(fun ({N, _}, A) when N =:= Node ->
+                                          A + 1;
+                                      ({_, _}, A) ->
+                                          A
+                                  end, Acc, Stack)
+              end, 0, Tasks).
