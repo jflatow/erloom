@@ -579,12 +579,21 @@ do_config(ConfId, State = #{spec := Spec}) ->
             %% give the sync a little bit of a chance to work by waiting a sec
             %% optimize by using responses in addition to the sync channel
             receive after 1000 -> ok end,
-            A = loom:multirpc(Start, Spec, min_refs(#{conf => ConfId, type => start}, State)),
-            B = loom:multirpc(Stop, Spec, min_refs(#{conf => ConfId, type => stop}, State)),
-            case {Start -- util:keys(A, ok), Stop -- util:keys(B, ok)} of
+            Pending =
+                case Start of
+                    [_|_] ->
+                        %% not all nodes are started, if we stop now its possible to destroy data
+                        A = loom:multirpc(Start, Spec, min_refs(#{conf => ConfId, type => start}, State)),
+                        {Start -- util:keys(A, ok), Stop};
+                    [] ->
+                        %% all nodes have been started, now we can stop
+                        B = loom:multirpc(Stop, Spec, min_refs(#{conf => ConfId, type => stop}, State)),
+                        {Start, Stop -- util:keys(B, ok)}
+                end,
+            case Pending of
                 {[], []} ->
                     {done, ConfId};
-                Pending ->
+                _ ->
                     {retry, {10, seconds}, {wait, Pending}}
             end
     end.
