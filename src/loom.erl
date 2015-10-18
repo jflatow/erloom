@@ -15,11 +15,15 @@
 -type spec() :: {atom(), term()}.
 -type home() :: iodata().
 -type opts() :: #{
-            idle_elapsed => non_neg_integer(),
+            idle_elapsed => non_neg_integer(),                %% state
             idle_timeout => non_neg_integer() | infinity,
             wipe_timeout => non_neg_integer(),
-            sync_initial => non_neg_integer(),
+            sync_initial => non_neg_integer(),                %% state
             sync_interval => pos_integer(),
+            sync_log_limit => pos_integer(),
+            sync_push_prob => float(),
+            task_limit => pos_integer() | infinity,
+            task_wait_for => pos_integer(),
             unanswered_max => pos_integer()
            }.
 
@@ -358,6 +362,8 @@ opts(Spec) ->
       sync_interval => 60000 + random:uniform(10000), %% stagger for efficiency
       sync_log_limit => 1000,
       sync_push_prob => 0.10,
+      task_limit => 100,
+      task_wait_for => 1000,
       unanswered_max => 2
      },
     maps:merge(Defaults, callback(Spec, {opts, 1}, [Spec], #{})).
@@ -729,7 +735,7 @@ command(#{verb := accrue, path := Path, value := Value}, State) ->
     State2#{response => {ok, util:lookup(State2, Path)}};
 command(#{verb := remove, path := Path, kind := chain}, State) ->
     State1 = State#{former => erloom_chain:lookup(State, Path)},
-    State2 = util:remove(State1, Path),
+    State2 = erloom_chain:remove(State1, Path),
     State2#{response => ok};
 command(#{verb := remove, path := Path}, State) ->
     State1 = State#{former => util:lookup(State, Path)},
@@ -776,7 +782,7 @@ suture_yarn(Message, State = #{message := #{yarn := Yarn}}) ->
 
 stitch_task(Base = #{name := _}, Node, Task, State) ->
     %% if its a base message, assume deps and yarn are set already
-    erloom_surety:task(Base, Node, Task, State);
+    erloom_surety:enqueue_task(Base, Node, Task, State);
 stitch_task(Name, Node, Task, State = #{message := #{yarn := Yarn}}) ->
     %% thread with the yarn of the current message, if there is one that has one
     %% also add minimal deps on current message

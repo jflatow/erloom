@@ -1,13 +1,13 @@
 -module(erloom_surety).
 
--export([task/4,
+-export([enqueue_task/4,
          handle_task/3,
          pause_tasks/1,
          launch_tasks/1,
          restart_tasks/1,
          tasks_remaining/2]).
 
-task(Base = #{name := Name}, Node, Task, State) ->
+enqueue_task(Base = #{name := Name}, Node, Task, State = #{tasks := Tasks, opts := Opts}) ->
     %% just insert into the table, it gets run once tasks are launched
     %% the task only gets launched on the specified node, but all nodes are aware of it
     %% this means tasks with the same name are queued globally, which is very useful
@@ -17,12 +17,32 @@ task(Base = #{name := Name}, Node, Task, State) ->
     %% NB: if tasks with the same name are triggered by unordered messages
     %%  or if a task is triggered by the same message for different nodes
     %%  the queue on each node may reflect different truths
-    util:modify(State, [tasks, Name],
-                fun (undefined) ->
-                        {undefined, [{Node, {Task, Base}}]};
-                    ({Pid, Stack}) ->
-                        {Pid, Stack ++ [{Node, {Task, Base}}]}
-                end).
+    %% NB: this call may block, in order to apply backpressure when launching tasks
+    %%  the limit applies to the number of queues (names) that are allowed concurrently
+    %%  the limit can be set to infinity to disable blocking altogether
+    #{task_limit := TaskLimit,
+      task_wait_for := TaskWaitFor} = Opts,
+    Wait =
+        case TaskLimit of
+            infinity ->
+                false;
+            N when map_size(Tasks) < N ->
+                false;
+            _ ->
+                %% we are at the limit, wait iff we would be creating a new queue
+                not util:has(Tasks, Name)
+        end,
+    case Wait of
+        true ->
+            receive after TaskWaitFor -> enqueue_task(Base, Node, Task, State) end;
+        false ->
+            util:modify(State, [tasks, Name],
+                        fun (undefined) ->
+                                {undefined, [{Node, {Task, Base}}]};
+                            ({Pid, Stack}) ->
+                                {Pid, Stack ++ [{Node, {Task, Base}}]}
+                        end)
+    end.
 
 handle_task(#{kind := retry, name := Name, value := Arg}, Node, State) ->
     util:replace(State, [tasks, Name],
@@ -87,6 +107,10 @@ spawn_task(Name, [{_, {{F, Arg}, Base}}|_], State) ->
                         %% give the user callback a chance to maybe log, or take action
                         loom:task_continued(Name, Reason, {N, Timer}, A, S),
                         receive after time:timeout(Wait) -> Loop(N + 1, A, loom:state(S)) end;
+                    {retry, A1, Wait, Reason} ->
+                        %% change the arg without sending a message
+                        loom:task_continued(Name, Reason, {N, Timer}, A, S),
+                        receive after time:timeout(Wait) -> Loop(N + 1, A1, loom:state(S)) end;
                     {renew, A1, Wait, Reason} ->
                         %% if the arg changes we send a message to notify the loom
                         %% if we crash, we must either:

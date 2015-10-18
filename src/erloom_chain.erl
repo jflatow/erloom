@@ -3,6 +3,7 @@
 %% erloom api
 -export([lookup/2,
          modify/3,
+         remove/2,
          accrue/3,
          accrue/4]).
 
@@ -25,6 +26,9 @@ modify(State, Path, {_, _} = Term) ->
     util:modify(State, Path, Term);
 modify(State, Path, {_, _, _} = Term) ->
     util:modify(State, Path, Term).
+
+remove(State, Path) ->
+    util:remove(State, Path).
 
 accrue(State, Path, {Value, Version}) ->
     accrue(State, Path, {Value, Version}, fun util:op/2).

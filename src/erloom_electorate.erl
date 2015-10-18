@@ -322,7 +322,7 @@ maybe_save_pending(_Motion, _MotionId, State) ->
 
 maybe_drop_pending(Key, MotionId, State) ->
     State1 = util:accrue(State, [elect, pending, Key], {'-', [MotionId]}),
-    util:sluice(State1, [elect, pending, Key], []).
+    util:prune(State1, [elect, pending, Key], []).
 
 maybe_voted(MotionId, Node, Vote, State) ->
     %% apply vote for node if the motion is open and the node hasn't yet voted
