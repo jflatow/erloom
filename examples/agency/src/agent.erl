@@ -8,6 +8,7 @@
          handle_idle/1,
          handle_info/2,
          handle_message/4,
+         command_called/4,
          vote_on_motion/3,
          motion_decided/4,
          task_completed/4,
@@ -68,6 +69,10 @@ handle_message(Message, Node, true, State) ->
 handle_message(_, _, false, State) ->
     State.
 
+command_called(Command, Node, DidChange, State) ->
+    io:format("~p command ~256p from ~256p [~p] ~n", [node(), Command, Node, DidChange]),
+    State.
+
 vote_on_motion(Motion, Mover, State) ->
     io:format("~p vote on ~256p from ~256p ~n", [node(), Motion, Mover]),
     {{yea, ok}, State}.
@@ -77,7 +82,8 @@ motion_decided(#{kind := chain, path := xyz}, Mover, {true, _}, State) when Move
     Modify = #{type => command, verb => modify, kind => chain, path => xyz, value => GenVal},
     State1 = loom:suture_yarn(Modify, State),
     State1#{response => [Mover, 'did pass chain']};
-motion_decided(#{yarn := Yarn}, Mover, Decision, State) ->
+motion_decided(Motion, Mover, Decision, State) ->
+    Yarn = util:get(Motion, yarn),
     io:format("~p decided ~256p for ~256p from ~256p~n", [node(), Decision, Yarn, Mover]),
     State.
 

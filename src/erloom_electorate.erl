@@ -45,6 +45,15 @@ motion(Motion, State) ->
                },
     loom:stitch_yarn(min_refs(Motion1, State), State).
 
+tether(Change = #{kind := batch, value := Batch}, State) ->
+    Change1 = Change#{
+                value =>
+                    [M#{
+                       kind => chain,
+                       prior => erloom_chain:version(State, Path)
+                      } || M = #{path := Path} <- Batch]
+               },
+    motion(Change1, State);
 tether(Change = #{path := Path}, State) ->
     Change1 = Change#{
                 kind => chain,
@@ -265,14 +274,12 @@ handle_ctrl(Ctrl = #{type := Type}, Node, State) ->
     %% when we see a node successfully started / stopped, we update the list
     %% the stop message also implies 'nay' on certain motions (see imply_votes)
     State1 =
-        util:replace(State, [elect, pending, {conf, get_conf_id(Ctrl)}],
-                     fun ({Start, Stop}) when Type =:= start ->
-                             {lists:delete(Node, Start), Stop};
-                         ({Start, Stop}) when Type =:= stop ->
-                             {Start, lists:delete(Node, Stop)};
-                         (Other) ->
-                             Other
-                     end),
+        util:swap(State, [elect, pending, {conf, get_conf_id(Ctrl)}],
+                  fun ({Start, Stop}) when Type =:= start ->
+                          {lists:delete(Node, Start), Stop};
+                      ({Start, Stop}) when Type =:= stop ->
+                          {Start, lists:delete(Node, Stop)}
+                  end),
     State2 = imply_votes(Ctrl, Node, State1),
     State2#{response => ok}.
 
@@ -317,21 +324,23 @@ maybe_save_ballot(#{fiat := _}, _, _, State) ->
 
 maybe_save_pending(#{kind := chain, path := Path}, MotionId, State) ->
     util:accrue(State, [elect, pending, {chain, Path}], {'+', [MotionId]});
+maybe_save_pending(#{kind := batch, value := Batch}, MotionId, State) ->
+    lists:foldl(fun (M, S) -> maybe_save_pending(M, MotionId, S) end, State, Batch);
 maybe_save_pending(_Motion, _MotionId, State) ->
     State.
 
 maybe_drop_pending(Key, MotionId, State) ->
     State1 = util:accrue(State, [elect, pending, Key], {'-', [MotionId]}),
-    util:prune(State1, [elect, pending, Key], []).
+    util:remove(State1, [elect, pending, Key], #{match => []}).
 
 maybe_voted(MotionId, Node, Vote, State) ->
     %% apply vote for node if the motion is open and the node hasn't yet voted
-    util:replace(State, [elect, MotionId],
-                 fun ({Kids, Motion, Votes}) when is_map(Votes) ->
-                         {Kids, Motion, util:ifndef(Votes, Node, Vote)};
-                     ({Kids, Motion, Other}) ->
-                         {Kids, Motion, Other}
-                 end).
+    util:swap(State, [elect, MotionId],
+              fun ({Kids, Motion, Votes}) when is_map(Votes) ->
+                      {Kids, Motion, util:create(Votes, Node, Vote)};
+                  ({Kids, Motion, Other}) ->
+                      {Kids, Motion, Other}
+              end).
 
 maybe_vote_stopped(Motion, MotionId, State) ->
     %% if a new motion is not dependent on the current conf
@@ -466,6 +475,10 @@ vote_on_motion(MotionId, #{kind := conf}, _, State) ->
     %% we won't be able to accept any alternative conf change now, only one that depends on this one
     {{yea, ok}, util:modify(State, [elect, current], MotionId)};
 vote_on_motion(MotionId, #{kind := chain, path := Path, prior := Prior} = Motion, Mover, State) ->
+    %% IP: its possible to relax the ordering and vote 'yea' even when locked or prior doesn't match
+    %%     i.e. if we know for sure that all operations are commutative whether they succeed or not
+    %%     in general we don't know here whether the order matters to the application or not
+    %%     we could add semantics to the operations to make it clear what the expectations are
     case erloom_chain:lookup(State, Path) of
         {_, _, _} ->
             %% the path is locked, cannot accept
@@ -482,6 +495,13 @@ vote_on_motion(MotionId, #{kind := chain, path := Path, prior := Prior} = Motion
             %% the prior doesn't match, cannot accept
             {{nay, version}, State}
     end;
+vote_on_motion(MotionId, #{kind := batch, value := Batch}, Mover, State) ->
+    %% a batch motion is accepted iff all the motions in the batch are accepted
+    util:roll(fun (M, {{yea, _}, S}) ->
+                      vote_on_motion(MotionId, M, Mover, S);
+                  (_, Acc) ->
+                      {stop, Acc}
+              end, {{yea, ok}, State}, Batch);
 vote_on_motion(_, Motion, Mover, State) ->
     loom:vote_on_motion(Motion, Mover, State).
 
@@ -492,12 +512,34 @@ resolve_motion(MotionId, #{kind := chain, path := Path} = Motion, Mover, Decisio
         case Decision of
             {true, _} ->
                 %% passed a motion to chain: treat as a command now
-                loom:command(Motion#{version => MotionId}, State2);
+                erloom_commands:handle_command(Motion#{version => MotionId}, Mover, State2);
             _ ->
                 %% failed to chain
                 State2#{response => {error, Decision}}
         end,
     motion_decided(Motion, Mover, Decision, State3);
+resolve_motion(MotionId, #{kind := batch, value := Batch} = Motion, Mover, Decision, State) ->
+    %% when the batch motion is decided, the entire batch is also decided
+    %% this is the benefit of batching motions: the overhead of one vote for an entire batch
+    %% IP: since the batch fails if even one operation fails, and typically we batch on chains
+    %%     we could probably get huge performance benefits with less strict voting rules
+    %%     if we implement commands with relaxed constraints on chains (see vote_on_motion)
+    %%     e.g. if a loom has a task which batches operations to change lots of values at once
+    %%      but the resources can be independently deleted while the task is running
+    %%      we would like to not have to reject a batch just because of a removal
+    %%      by indicating that 'replace + remove' and 'remove + replace' have the same outcome
+    State1 =
+        lists:foldl(fun (M, S) ->
+                            resolve_motion(MotionId, M, Mover, Decision, S)
+                    end, State, Batch),
+    State2 =
+        case Decision of
+            {true, _} ->
+                State1#{response => {ok, Decision}};
+            _ ->
+                State1#{response => {error, Decision}}
+        end,
+    motion_decided(Motion, Mover, Decision, State2);
 resolve_motion(_MotionId, Motion, Mover, Decision, State) ->
     State1 =
         case Decision of

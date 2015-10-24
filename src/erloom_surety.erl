@@ -45,14 +45,14 @@ enqueue_task(Base = #{name := Name}, Node, Task, State = #{tasks := Tasks, opts 
     end.
 
 handle_task(#{kind := retry, name := Name, value := Arg}, Node, State) ->
-    util:replace(State, [tasks, Name],
-                 fun ({Pid, Stack}) ->
-                         %% update the arg, it will be used if we respawn
-                         {Pid, util:replace(Stack, Node,
-                                            fun ({{Fun, _}, Base}) ->
-                                                    {{Fun, Arg}, Base}
-                                            end)}
-                 end);
+    util:swap(State, [tasks, Name],
+              fun ({Pid, Stack}) ->
+                      %% update the arg, it will be used if we respawn
+                      {Pid, util:swap(Stack, Node,
+                                      fun ({{Fun, _}, Base}) ->
+                                              {{Fun, Arg}, Base}
+                                      end)}
+              end);
 handle_task(#{kind := kill, name := Name} = Message, Node, State) ->
     %% allow outsiders to safely stop the task
     case util:lookup(State, [tasks, Name]) of

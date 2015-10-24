@@ -3,9 +3,14 @@
 %% erloom api
 -export([lookup/2,
          modify/3,
-         remove/2,
          accrue/3,
-         accrue/4]).
+         accrue/4,
+         create/3,
+         create/4,
+         remove/2,
+         remove/3,
+         swap/3,
+         swap/4]).
 
 %% public api
 -export([lock/3,
@@ -27,14 +32,39 @@ modify(State, Path, {_, _} = Term) ->
 modify(State, Path, {_, _, _} = Term) ->
     util:modify(State, Path, Term).
 
-remove(State, Path) ->
-    util:remove(State, Path).
-
 accrue(State, Path, {Value, Version}) ->
     accrue(State, Path, {Value, Version}, fun util:op/2).
 
 accrue(State, Path, {Value, Version}, Op) ->
     modify(State, Path, {fun (Prior) -> Op(Prior, Value) end, Version}).
+
+create(State, Path, Initial) ->
+    create(State, Path, Initial, []).
+
+create(State, Path, Initial, Opts) ->
+    swap(State, Path, Initial, util:set(Opts, match, fun (E) -> element(1, E) =:= undefined end)).
+
+remove(State, Path) ->
+    remove(State, Path, []).
+
+remove(State, Path, Opts) ->
+    case util:match(lookup(State, Path), util:get(Opts, match, fun (_) -> true end)) of
+        {true, _} = Tag ->
+            util:tagged(Tag, util:remove(State, Path), util:get(Opts, tagged));
+        {false, _} = Tag ->
+            util:tagged(Tag, State, util:get(Opts, tagged))
+    end.
+
+swap(State, Path, Swap) ->
+    swap(State, Path, Swap, []).
+
+swap(State, Path, Swap, Opts) ->
+    case util:match(lookup(State, Path), util:get(Opts, match, fun (E) -> element(1, E) =/= undefined end)) of
+        {true, _} = Tag ->
+            util:tagged(Tag, modify(State, Path, Swap), util:get(Opts, tagged));
+        {false, _} = Tag ->
+            util:tagged(Tag, State, util:get(Opts, tagged))
+    end.
 
 lock(State, Path, Lock) ->
     case lookup(State, Path) of

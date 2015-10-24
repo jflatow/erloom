@@ -12,13 +12,13 @@
               motion/0,
               ballot/0]).
 
--type spec() :: {atom(), term()}.
+-type spec() :: {atom(), term()} | state().
 -type home() :: iodata().
 -type opts() :: #{
-            idle_elapsed => non_neg_integer(),                %% state
+            idle_elapsed => non_neg_integer(),                %% state, not really opt
             idle_timeout => non_neg_integer() | infinity,
             wipe_timeout => non_neg_integer(),
-            sync_initial => non_neg_integer(),                %% state
+            sync_initial => non_neg_integer(),                %% state, not really opt
             sync_interval => pos_integer(),
             sync_log_limit => pos_integer(),
             sync_push_prob => float(),
@@ -32,7 +32,7 @@
                vsn => vsn(),
                deps => erloom:edge(),
                refs => erloom:loci(),
-               type => start | stop | motion | ballot | ratify | move | tether | fence | task | command | atom(),
+               type => start | stop | command | motion | ballot | ratify | move | tether | fence | task | atom(),
                kind => atom(),
                yarn => term()
               }.
@@ -66,11 +66,18 @@
              former => term()
             }.
 
+-type command() :: #{ %% + message()
+               kind => chain | batch | atom(),
+               verb => lookup | modify | accrue | create | remove | swap | atom(),
+               path => atom() | list(),
+               value => term()
+              }.
+
 -type vote() :: {yea, term()} | {nay, term()}.
 -type decision() :: {boolean(), term()}.
 -type motion() :: #{  %% + message()
               type => motion,
-              kind => conf | chain | atom(),
+              kind => conf | chain | batch | atom(),
               conf => root | undefined,
               fiat => decision()
              }.
@@ -79,12 +86,6 @@
               vote => vote(),
               fiat => decision()
              }.
--type command() :: #{ %% + message()
-               kind => chain | atom(),
-               verb => lookup | modify | remove | atom(),
-               path => atom() | list(),
-               value => term()
-              }.
 
 -callback vsn(spec()) -> vsn().
 -callback find(spec()) -> [node()].
@@ -103,6 +104,7 @@
 -callback handle_idle(state()) -> state().
 -callback handle_info(term(), state()) -> state().
 -callback handle_message(message(), node(), boolean(), state()) -> state().
+-callback command_called(command(), node(), boolean(), state()) -> state().
 -callback vote_on_motion(motion(), node(), state()) -> {vote(), state()}.
 -callback motion_decided(motion(), node(), decision(), state()) -> state().
 -callback task_completed(message(), node(), term(), state()) -> state().
@@ -122,6 +124,7 @@
                      handle_idle/1,
                      handle_info/2,
                      handle_message/4,
+                     command_called/4,
                      vote_on_motion/3,
                      motion_decided/4,
                      task_completed/4,
@@ -174,6 +177,7 @@
          handle_idle/1,
          handle_info/2,
          handle_message/4,
+         command_called/4,
          vote_on_motion/3,
          motion_decided/4,
          task_completed/4,
@@ -185,9 +189,6 @@
          callback/4]).
 
 -export([change_peers/2]).
-
--spec command(command(), state()) -> state().
--export([command/2]).
 
 -export([stitch_yarn/2,
          suture_yarn/2,
@@ -632,11 +633,12 @@ handle_builtin(Message = #{type := tether}, Node, State) when Node =:= node() ->
     %% its convenient to be able to push a node to move a chain
     make_tether(Message, State);
 
+handle_builtin(Message = #{type := command}, Node, State) ->
+    %% commands apply generic operations to a path in the state
+    erloom_commands:handle_command(Message, Node, State);
 handle_builtin(Message = #{type := task}, Node, State) ->
     %% task messages are for the surety to either retry or complete a task
     erloom_surety:handle_task(Message, Node, State);
-handle_builtin(Message = #{type := command}, _Node, State) ->
-    command(Message, State);
 handle_builtin(_Message, _Node, State) ->
     State#{response => ok}.
 
@@ -648,6 +650,9 @@ handle_message(Message, Node, IsNew, State) ->
     State2 = handle_builtin(Message, Node, State1),
     State3 = callback(State2, {handle_message, 4}, [Message, Node, IsNew, State2], State2),
     maybe_reply(State3).
+
+command_called(Command, Node, DidChange, State) ->
+    callback(State, {command_called, 4}, [Command, Node, DidChange, State], State).
 
 vote_on_motion(Motion, Mover, State) ->
     callback(State, {vote_on_motion, 3}, [Motion, Mover, State], {{yea, ok}, State}).
@@ -705,49 +710,6 @@ change_peers({'-', Nodes}, State) ->
     util:accrue(State, peers, [{except, Nodes}]);
 change_peers({'=', Nodes}, State) ->
     change_peers({'+', Nodes}, State#{peers => #{}}).
-
-command(#{verb := lookup, path := Path, kind := probe}, State) ->
-    case util:lookup(State, [elect, pending, {chain, Path}]) of
-        undefined ->
-            State#{response => {ok, erloom_chain:value(State, Path)}};
-        MotionId ->
-            State#{response => {wait, MotionId}}
-    end;
-command(#{verb := lookup, path := Path, kind := chain}, State) ->
-    State#{response => {ok, erloom_chain:value(State, Path)}};
-command(#{verb := lookup, path := Path}, State) ->
-    State#{response => {ok, util:lookup(State, Path)}};
-command(#{verb := modify, path := Path, value := Value, kind := chain} = Command, State) ->
-    State1 = State#{former => erloom_chain:lookup(State, Path)},
-    State2 = erloom_chain:modify(State1, Path, {Value, version(Command, State)}),
-    State2#{response => {ok, Value}};
-command(#{verb := modify, path := Path, value := Value}, State) ->
-    State1 = State#{former => util:lookup(State, Path)},
-    State2 = util:modify(State1, Path, Value),
-    State2#{response => {ok, Value}};
-command(#{verb := accrue, path := Path, value := Value, kind := chain} = Command, State) ->
-    State1 = State#{former => erloom_chain:lookup(State, Path)},
-    State2 = erloom_chain:accrue(State1, Path, {Value, version(Command, State)}),
-    State2#{response => {ok, erloom_chain:value(State2, Path)}};
-command(#{verb := accrue, path := Path, value := Value}, State) ->
-    State1 = State#{former => util:lookup(State, Path)},
-    State2 = util:accrue(State1, Path, Value),
-    State2#{response => {ok, util:lookup(State2, Path)}};
-command(#{verb := remove, path := Path, kind := chain}, State) ->
-    State1 = State#{former => erloom_chain:lookup(State, Path)},
-    State2 = erloom_chain:remove(State1, Path),
-    State2#{response => ok};
-command(#{verb := remove, path := Path}, State) ->
-    State1 = State#{former => util:lookup(State, Path)},
-    State2 = util:remove(State1, Path),
-    State2#{response => ok};
-command(_, State) ->
-    State.
-
-version(#{version := Version}, _State) ->
-    Version;
-version(_, State) ->
-    after_locus(State).
 
 %% Yarns serve 3 purposes:
 %%  1. Deferring replies to a message
