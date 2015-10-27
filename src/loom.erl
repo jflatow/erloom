@@ -54,6 +54,7 @@
              edges => erloom:edges(),
              point => erloom:edge(),
              locus => erloom:locus(),
+             names => [],
              peers => #{node() => boolean()},
              wrote => {non_neg_integer(), non_neg_integer()},
              cache => #{node() => {pid() | undefined, non_neg_integer()}},
@@ -145,6 +146,8 @@
          multirpc/3,
          multirpc/4,
          multircv/3,
+         patch/2,
+         patch/3,
          dispatch/2,
          dispatch/3,
          deliver/3,
@@ -272,6 +275,14 @@ multirpc(Nodes, Spec, Message, Opts) ->
 multircv(Spec, Message, Opts) ->
     {node(), apply(loom, call, [Spec, Message, Opts])}.
 
+%% 'patch' dispatches a message to a loom (but unwraps it by default)
+
+patch(Spec, Message) ->
+    patch(Spec, Message, []).
+
+patch(Spec, Message, Opts) ->
+    dispatch(Spec, Message, util:create(Opts, wrapped, false)).
+
 %% 'dispatch' tries to find and deliver a message to a loom by its spec
 %% used when we don't know where the loom nodes are
 
@@ -380,12 +391,22 @@ keep(State) ->
     %% edges is cached: its where we think other nodes are
     %% point is permanent: exactly where our state is
     %% locus is permanent: the span of the current message
+    %% names is permanent: reserved for managers
     %% peers is a special case of permanent keys + transient values, we just keep both:
     %%  the keys are the nodes that count as part of our 'cluster', e.g. for writing
     %%  the values tell if the node was counted during the last write through
     %% emits is permanent: messages yet to emit from the current state
     %% tasks is permanent (mostly): tasks which are currently running
-    Builtins = maps:with([active, vsns, edges, point, locus, peers, emits, elect, tasks], State),
+    Builtins = maps:with([active,
+                          vsns,
+                          edges,
+                          point,
+                          locus,
+                          names,
+                          peers,
+                          emits,
+                          elect,
+                          tasks], State),
     maps:merge(Builtins, callback(State, {keep, 1}, [State], #{})).
 
 save(State) ->
@@ -400,6 +421,7 @@ load(State = #{home := _}) ->
       active => false,
       edges => #{},
       point => #{},
+      names => [],
       peers => #{},
       emits => [],
       tasks => #{},

@@ -28,14 +28,14 @@ handle_command(Command, Node, State) ->
 command(#{verb := lookup, path := Path, kind := probe}, State) ->
     case util:lookup(State, [elect, pending, {chain, Path}]) of
         undefined ->
-            State#{response => {ok, erloom_chain:value(State, Path)}};
+            State#{response => {ok, {false, erloom_chain:value(State, Path)}}};
         MotionId ->
             State#{response => {wait, MotionId}}
     end;
 command(#{verb := lookup, path := Path, kind := chain}, State) ->
-    State#{response => {ok, erloom_chain:value(State, Path)}};
+    State#{response => {ok, {false, erloom_chain:value(State, Path)}}};
 command(#{verb := lookup, path := Path}, State) ->
-    State#{response => {ok, util:lookup(State, Path)}};
+    State#{response => {ok, {false, util:lookup(State, Path)}}};
 
 command(#{verb := modify, path := Path, value := Value, kind := chain} = Command, State) ->
     {{true, erloom_chain:lookup(State, Path)}, erloom_chain:modify(State, Path, {Value, version(Command, State)})};
@@ -48,19 +48,19 @@ command(#{verb := accrue, path := Path, value := Value}, State) ->
     {{true, util:lookup(State, Path)}, util:accrue(State, Path, Value)};
 
 command(#{verb := create, path := Path, value := Value} = Command, State) ->
-    erloom_chain:create(State, Path, {Value, version(Command, State)}, #{tagged => true});
+    erloom_chain:create(State, Path, {Value, version(Command, State)}, #{wrapped => true});
 command(#{verb := create, path := Path, value := Value, kind := chain}, State) ->
-    util:create(State, Path, Value, #{tagged => true});
+    util:create(State, Path, Value, #{wrapped => true});
 
 command(#{verb := remove, path := Path, kind := chain}, State) ->
-    erloom_chain:remove(State, Path, #{tagged => true});
+    erloom_chain:remove(State, Path, #{wrapped => true});
 command(#{verb := remove, path := Path}, State) ->
-    util:remove(State, Path, #{tagged => true});
+    util:remove(State, Path, #{wrapped => true});
 
 command(#{verb := swap, path := Path, value := Value, kind := chain} = Command, State) ->
-    erloom_chain:swap(State, Path, {Value, version(Command, State)}, #{tagged => true});
+    erloom_chain:swap(State, Path, {Value, version(Command, State)}, #{wrapped => true});
 command(#{verb := swap, path := Path, value := Value}, State) ->
-    util:swap(State, Path, Value, #{tagged => true});
+    util:swap(State, Path, Value, #{wrapped => true});
 
 command(_, State) ->
     State.

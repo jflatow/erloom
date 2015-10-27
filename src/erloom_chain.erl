@@ -50,9 +50,9 @@ remove(State, Path) ->
 remove(State, Path, Opts) ->
     case util:match(lookup(State, Path), util:get(Opts, match, fun (_) -> true end)) of
         {true, _} = Tag ->
-            util:tagged(Tag, util:remove(State, Path), util:get(Opts, tagged));
+            util:wrap(Tag, util:remove(State, Path), util:get(Opts, wrapped));
         {false, _} = Tag ->
-            util:tagged(Tag, State, util:get(Opts, tagged))
+            util:wrap(Tag, State, util:get(Opts, wrapped))
     end.
 
 swap(State, Path, Swap) ->
@@ -61,9 +61,9 @@ swap(State, Path, Swap) ->
 swap(State, Path, Swap, Opts) ->
     case util:match(lookup(State, Path), util:get(Opts, match, fun (E) -> element(1, E) =/= undefined end)) of
         {true, _} = Tag ->
-            util:tagged(Tag, modify(State, Path, Swap), util:get(Opts, tagged));
+            util:wrap(Tag, modify(State, Path, Swap), util:get(Opts, wrapped));
         {false, _} = Tag ->
-            util:tagged(Tag, State, util:get(Opts, tagged))
+            util:wrap(Tag, State, util:get(Opts, wrapped))
     end.
 
 lock(State, Path, Lock) ->
