@@ -15,6 +15,8 @@
          task_continued/5,
          needs_upgrade/2]).
 
+-export([do_task/3]).
+
 vsn(_) ->
     #{agent => {2, 0, 0}}.
 
@@ -53,6 +55,9 @@ handle_message(#{do := get_state}, _Node, true, State) ->
     State#{response => State};
 handle_message(#{do := emit}, _Node, true, State) ->
     loom:stitch_yarn(#{do => reply}, util:delete(State, response));
+handle_message(#{do := task}, Node, true, State) ->
+    Task = {fun ?MODULE:do_task/3, nil},
+    loom:stitch_task(task_reply, Node, Task, util:delete(State, response));
 handle_message(#{do := reply}, _Node, true, State) ->
     State#{response => got_it};
 handle_message(#{type := start}, Node, true, State) ->
@@ -98,3 +103,8 @@ task_continued(Name, Reason, {N, T}, _Arg, _State) ->
 needs_upgrade(Vsn, State) ->
     io:format("~p needs upgrade to vsn ~256p~n", [node(), Vsn]),
     State.
+
+do_task({0, _}, Arg, _State) ->
+    {retry, {1, seconds}, Arg};
+do_task({1, T}, Arg, _State) ->
+    {done, {T, Arg}}.

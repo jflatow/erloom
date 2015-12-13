@@ -119,15 +119,15 @@ spawn_task(Name, [{_, {{F, Arg}, Base}}|_], State) ->
                         %%  3. try the next arg with an additional wait penalty
                         %% regardless, we can't avoid the possibility of repeating an arg
                         %% crashing is rare, all options have issues: do something simple (#2)
-                        loom:call(S, Base#{type => task, kind => retry, value => A1}),
+                        loom:send(S, Base#{type => task, kind => retry, value => A1}),
                         loom:task_continued(Name, Reason, {N, Timer}, A, S),
                         receive after time:timeout(Wait) -> Loop(N + 1, A1, loom:state(S)) end;
                     {done, Result} ->
                         %% when we are done, notify the loom so we can finish the task
-                        loom:call(S, Base#{type => task, kind => done, value => Result});
+                        loom:send(S, Base#{type => task, kind => done, value => Result});
                     Other ->
                         %% user failure happens, treat it like done but different
-                        loom:call(S, Base#{type => task, kind => fail, value => Other})
+                        loom:send(S, Base#{type => task, kind => fail, value => Other})
                 end
         end,
     spawn_link(fun () -> Run(0, Arg, State) end).

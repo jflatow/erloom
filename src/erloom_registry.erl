@@ -66,6 +66,8 @@ erase_(IdOrPid, State = #state{looms=Looms}) ->
 
 %% registry interface
 
+proc(undefined, _) ->
+    error(badarg);
 proc(Id, Spec) when is_atom(Id) ->
     case whereis(Id) of
         undefined ->

@@ -32,9 +32,12 @@
                vsn => vsn(),
                deps => erloom:edge(),
                refs => erloom:loci(),
-               type => start | stop | command | motion | ballot | ratify | move | tether | fence | task | atom(),
+               type => (upgrade | sleep | start | stop |
+                        command | motion | ballot | ratify |
+                        move | tether | fence | task | atom()),
                kind => atom(),
-               yarn => term()
+               yarn => term(),
+               mute => boolean()
               }.
 -type reply() :: fun((term()) -> term()).
 -type state() :: #{
@@ -88,8 +91,12 @@
               fiat => decision()
              }.
 
+-type context() :: #{}. %% NB: an in/out parameter for 2-way communication
+
 -callback vsn(spec()) -> vsn().
--callback find(spec()) -> [node()].
+-callback find(spec(), context()) ->
+    {ok, {spec(), [node()]}, context()} |
+    {error, term(), context()}.
 -callback proc(spec()) -> pid().
 -callback home(spec()) -> home().
 -callback opts(spec()) -> opts().
@@ -114,7 +121,7 @@
 -callback needs_upgrade(vsn(), state()) -> state().
 
 -optional_callbacks([vsn/1,
-                     find/1,
+                     find/2,
                      proc/1,
                      opts/1,
                      keep/1,
@@ -155,6 +162,7 @@
 
 -export([vsn/1,
          find/1,
+         find/2,
          proc/1,
          home/1,
          opts/1,
@@ -174,6 +182,7 @@
          maybe_reply/1,
          maybe_reply/2,
          maybe_reply/3,
+         no_reply/1,
          unmet_needs/2,
          verify_message/2,
          write_through/3,
@@ -204,8 +213,13 @@
 %% it is called only the first time the loom is *ever* used,
 %% assuming the message is persisted (write_through not overridden)
 
-seed(Spec) ->
-    seed(Spec, [node()]).
+seed(Specish) ->
+    case find(Specish) of
+        {ok, {Spec, Nodes}, _} ->
+            seed(Spec, Nodes);
+        {error, Reason, _} ->
+            {error, {find, Reason}}
+    end.
 
 seed(Spec, Nodes) ->
     seed(Spec, Nodes, []).
@@ -275,67 +289,93 @@ multirpc(Nodes, Spec, Message, Opts) ->
 multircv(Spec, Message, Opts) ->
     {node(), apply(loom, call, [Spec, Message, Opts])}.
 
-%% 'patch' dispatches a message to a loom (but unwraps it by default)
+%% 'patch' dispatches a message to a loom, but flattens the response
 
-patch(Spec, Message) ->
-    patch(Spec, Message, []).
+patch(Specish, Message) ->
+    patch(Specish, Message, #{}).
 
-patch(Spec, Message, Opts) ->
-    dispatch(Spec, Message, util:create(Opts, wrapped, false)).
+patch(Specish, Message, Ctx) ->
+    case dispatch(Specish, Message, Ctx) of
+        {ok, {ok, Response}, Ctx1} ->
+            {ok, Response, Ctx1};
+        {ok, {error, Reason}, Ctx1} ->
+            {error, Reason, Ctx1};
+        {ok, Response, Ctx1} ->
+            {ok, Response, Ctx1};
+        {error, Reason, Ctx1} ->
+            {error, Reason, Ctx1}
+    end.
 
-%% 'dispatch' tries to find and deliver a message to a loom by its spec
-%% used when we don't know where the loom nodes are
+%% 'dispatch' tries to find and deliver a message to a loom
 
-dispatch(Spec, Message) ->
-    dispatch(Spec, Message, []).
+dispatch(Specish, Message) ->
+    dispatch(Specish, Message, #{}).
 
-dispatch(Spec, Message, Opts) ->
-    deliver(find(Spec), Spec, Message, Opts).
+dispatch(Specish, Message, Ctx) ->
+    case find(Specish, Ctx) of
+        {ok, {Spec, Nodes}, Ctx1, FollowUp} ->
+            Delivery = deliver(Nodes, Spec, Message, Ctx1),
+            FollowUp(Specish, Message, Delivery);
+        {ok, {Spec, Nodes}, Ctx1} ->
+            deliver(Nodes, Spec, Message, Ctx1);
+        {error, Reason, Ctx1} ->
+            {error, Reason, Ctx1}
+    end.
 
 %% 'deliver' tries to get a message through to one of the nodes for a loom
 %% it tries the nodes randomly, starting with a preferred node, if given
 %% we retry as many times as desired, or the caller can retry
 
 deliver(Nodes, Spec, Message) ->
-    deliver(Nodes, Spec, Message, []).
+    deliver(Nodes, Spec, Message, #{}).
 
-deliver(Nodes, Spec, Message, Opts) ->
-    deliver(Nodes, Spec, Message, Opts, [], Nodes).
+deliver(Nodes, Spec, Message, Ctx) ->
+    deliver(Nodes, Spec, Message, Ctx, [], Nodes).
 
-deliver(Nodes, Spec, Message, Opts, Tried, Remaining) ->
+deliver(Nodes, Spec, Message, Ctx, Tried, Remaining) ->
     %% NB: we can't be certain messages never reach a loom, so they should be idempotent
-    Wrapped = util:get(Opts, wrapped, true),
-    case util:draw(Remaining, util:get(Opts, pref, node())) of
+    case util:draw(Remaining, util:get(Ctx, pref, node())) of
         {undefined, _} ->
-            case util:get(Opts, retry, {0, infinity}) of
+            case util:get(Ctx, retry, {0, infinity}) of
                 {infinity, T} ->
-                    receive after T -> deliver(Nodes, Spec, Message, Opts) end;
+                    receive after T -> deliver(Nodes, Spec, Message, Ctx) end;
                 {N, T} when is_integer(N), N > 0 ->
-                    Opts1 = Opts#{retry => {N - 1, T}},
-                    receive after T -> deliver(Nodes, Spec, Message, Opts1) end;
-                _ when Wrapped ->
-                    {undefined, Spec, {error, {delivery, Tried}}};
+                    Ctx1 = util:set(Ctx, retry, {N - 1, T}),
+                    receive after T -> deliver(Nodes, Spec, Message, Ctx1) end;
                 _ ->
-                    {error, {delivery, Tried}}
+                    {error, delivery,
+                     util:set(Ctx, dstat,
+                              #{
+                                 spec => Spec,
+                                 nodes => Nodes,
+                                 tried => Tried,
+                                 message => Message
+                               })}
             end;
         {Node, R1} ->
-            Response = rpc(Node, Spec, Message, Opts),
+            Response = rpc(Node, Spec, Message, Ctx),
             T1 = util:set(Tried, Node, Response),
             case Response of
                 {badrpc, _} ->
                     %% the message never even got to the loom
-                    deliver(Nodes, Spec, Message, Opts, T1, R1);
+                    deliver(Nodes, Spec, Message, Ctx, T1, R1);
                 {retry, _} ->
                     %% the loom didn't accept the message
-                    deliver(Nodes, Spec, Message, Opts, T1, R1);
+                    deliver(Nodes, Spec, Message, Ctx, T1, R1);
                 {wait, timeout} ->
-                    %% delivery message shouldn't block: a timeout is a failure
-                    deliver(Nodes, Spec, Message, Opts, T1, R1);
-                _ when Wrapped ->
-                    %% any other response from the loom is considered received
-                    {Node, Spec, Response};
+                    %% timeout is considered a failure during delivery
+                    deliver(Nodes, Spec, Message, Ctx, T1, R1);
                 _ ->
-                    Response
+                    %% any other response from the loom is considered received
+                    {ok, Response,
+                     util:set(Ctx, dstat,
+                              #{
+                                 spec => Spec,
+                                 node => Node,
+                                 nodes => Nodes,
+                                 tried => T1,
+                                 message => Message
+                               })}
             end
     end.
 
@@ -346,12 +386,15 @@ deliver(Nodes, Spec, Message, Opts, Tried, Remaining) ->
 vsn(Spec) ->
     maps:merge(callback(Spec, {vsn, 1}, [Spec], #{}), #{}).
 
-%% 'find' defines the mechanism for locating nodes for a spec
+%% 'find' takes a spec or something similar and returns the exact spec and nodes
 %% when it's unknown which nodes a loom is running on, this is where to look
-%% can block for an arbitrarily long time, and may return an empty list
+%% can block for an arbitrarily long time, and may return an error
 
-find(Spec) ->
-    callback(Spec, {find, 1}, [Spec], [node()]).
+find(Specish) ->
+    find(Specish, #{}).
+
+find(Specish, Ctx) ->
+    callback(Specish, {find, 2}, [Specish, Ctx], {ok, {Specish, [node()]}, Ctx}).
 
 %% 'proc' defines the mechanism for getting or creating the pid for a spec
 %% the default is to use spec as the registry key, which requires erloom app is running
@@ -503,17 +546,13 @@ defer_reply(Name, State = #{reply := Replies}) ->
     end.
 
 maybe_reply(State) ->
-    %% setting response to undefined, or removing it, disables the default response
-    case util:get(State, response) of
-        undefined ->
-            State;
-        Val ->
-            maybe_reply(Val, State)
-    end.
+    maybe_reply(util:get(State, response), State).
 
 maybe_reply(Response, State) ->
     maybe_reply(default, Response, State).
 
+maybe_reply(_, undefined, State) ->
+    State;
 maybe_reply(Reply, Response, State) when is_function(Reply) ->
     Reply(Response),
     State;
@@ -526,6 +565,10 @@ maybe_reply(Name, Response, State) ->
         Reply ->
             maybe_reply(Reply, Response, util:remove(State, [reply, Name]))
     end.
+
+no_reply(State) ->
+    %% setting response to undefined, or removing it, disables the default response
+    util:delete(State, response).
 
 after_locus(#{locus := Locus}) ->
     erloom:locus_after(Locus).
@@ -614,6 +657,8 @@ verify_message(Message, State) ->
             {retry, Reason, State}
     end.
 
+write_through(#{mute := true}, _, _) ->
+    {0, infinity};
 write_through(Message, N, State) ->
     %% how many copies of a message are required for a successful write? in what timeframe?
     callback(State, {write_through, 3}, [Message, N, State], {1, infinity}).
@@ -627,49 +672,52 @@ handle_info(Info, State) ->
     Untrap = fun () -> proc:untrap(Info, State) end,
     callback(State, {handle_info, 2}, [Info, State], Untrap).
 
-cancel_builtin(#{yarn := Yarn}, Node, State) when Node =:= node() ->
-    %% cancel pending emit of a yarn every time we see one
-    util:remove(State, [emits, {node(), Yarn}]);
-cancel_builtin(_, _, State) ->
+cancel_builtin(#{yarn := Yarn}, Node, false, State) when Node =:= node() ->
+    %% cancel pending emit of a yarn every time we see one replayed
+    %% don't do this for new messages, since they are already popped off the stack
+    util:modify(State, emits, fun (E) -> lists:keydelete({node(), Yarn}, 1, E) end);
+cancel_builtin(_Message, _Node, _IsNew, State) ->
     State.
 
-handle_builtin(#{type := upgrade, vsn := Vsn}, Node, State) ->
+handle_builtin(#{type := upgrade, vsn := Vsn}, Node, _, State) ->
     util:modify(State, [vsns, Node], Vsn);
+handle_builtin(#{type := sleep}, _, true, State) ->
+    sleep(maybe_reply({goodnight, moon}, State));
 
-handle_builtin(Message = #{type := start}, Node, State) ->
+handle_builtin(Message = #{type := start}, Node, _, State) ->
     erloom_electorate:handle_ctrl(Message, Node, start(Node, State));
-handle_builtin(Message = #{type := stop}, Node, State) ->
+handle_builtin(Message = #{type := stop}, Node, _, State) ->
     erloom_electorate:handle_ctrl(Message, Node, stop(Node, State));
 
-handle_builtin(Message = #{type := motion}, Node, State) ->
+handle_builtin(Message = #{type := motion}, Node, _, State) ->
     erloom_electorate:handle_motion(Message, Node, State);
-handle_builtin(Message = #{type := ballot}, Node, State) ->
+handle_builtin(Message = #{type := ballot}, Node, _, State) ->
     erloom_electorate:handle_ballot(Message, Node, State);
-handle_builtin(Message = #{type := ratify}, Node, State) ->
+handle_builtin(Message = #{type := ratify}, Node, _, State) ->
     erloom_electorate:handle_ratify(Message, Node, State);
 
-handle_builtin(Message = #{type := move}, Node, State) when Node =:= node() ->
+handle_builtin(Message = #{type := move}, Node, _, State) when Node =:= node() ->
     %% its convenient to be able to push a node to make a motion
     make_motion(Message, State);
-handle_builtin(Message = #{type := tether}, Node, State) when Node =:= node() ->
+handle_builtin(Message = #{type := tether}, Node, _, State) when Node =:= node() ->
     %% its convenient to be able to push a node to move a chain
     make_tether(Message, State);
 
-handle_builtin(Message = #{type := command}, Node, State) ->
+handle_builtin(Message = #{type := command}, Node, _, State) ->
     %% commands apply generic operations to a path in the state
     erloom_commands:handle_command(Message, Node, State);
-handle_builtin(Message = #{type := task}, Node, State) ->
+handle_builtin(Message = #{type := task}, Node, _, State) ->
     %% task messages are for the surety to either retry or complete a task
     erloom_surety:handle_task(Message, Node, State);
-handle_builtin(_Message, _Node, State) ->
+handle_builtin(_Message, _Node, _IsNew, State) ->
     State#{response => ok}.
 
 handle_message(Message, Node, IsNew, State) ->
     %% called to transform state for every message on every node
     %% happens 'at least once', should be externally idempotent
     %% for 'at most once', check if is new
-    State1 = cancel_builtin(Message, Node, State),
-    State2 = handle_builtin(Message, Node, State1),
+    State1 = cancel_builtin(Message, Node, IsNew, State),
+    State2 = handle_builtin(Message, Node, IsNew, State1),
     State3 = callback(State2, {handle_message, 4}, [Message, Node, IsNew, State2], State2),
     maybe_reply(State3).
 
@@ -685,10 +733,14 @@ motion_decided(Motion, Mover, Decision, State) ->
     callback(State, {motion_decided, 4}, [Motion, Mover, Decision, State], State).
 
 task_completed(Message = #{name := config}, Node, Result, State) ->
-    State1 = erloom_electorate:handle_task(Message, Node, Result, State),
+    State1 = erloom_electorate:task_completed(Message, Node, Result, State),
     callback(State1, {task_completed, 4}, [Message, Node, Result, State1], State1);
-task_completed(Message, Node, Result, State) ->
-    callback(State, {task_completed, 4}, [Message, Node, Result, State], State).
+task_completed(Message = #{yarn := Yarn}, Node, Result, State) ->
+    %% let the final task value serve as a potential response for the yarn
+    %% NB: there is no way to override this from the task_completed handler
+    %%     the response in the handler is for the task process itself
+    State1 = maybe_reply(Yarn, util:get(Message, value), State),
+    callback(State1, {task_completed, 4}, [Message, Node, Result, State1], State1).
 
 task_continued(Name, Reason, Clock, Arg, State) ->
     callback(State, {task_continued, 5}, [Name, Reason, Clock, Arg, State], ok).
@@ -739,11 +791,11 @@ change_peers({'=', Nodes}, State) ->
 %%  3. Preventing the duplicate generation of new information
 
 stitch_yarn(Message = #{yarn := Yarn}, State) ->
-    %% add to emits: only one message pending per yarn (on node) at a time
+    %% add to emits: stack yarns per node
     %% yarns always defer replies (i.e. we should eventually reply, now or later)
     %% if the yarn is specified, assume deps are too
     State1 = defer_reply(Yarn, State),
-    util:modify(State1, [emits, {node(), Yarn}], Message, []);
+    util:modify(State1, emits, fun (E) -> E ++ [{{node(), Yarn}, Message}] end);
 stitch_yarn(Message, State = #{message := #{yarn := Yarn}}) ->
     %% thread with the yarn of the current message, if there is one that has one
     %% also add minimal deps on current message
@@ -764,9 +816,10 @@ suture_yarn(Message, State = #{message := #{yarn := Yarn}}) ->
 %% Tasks have similar "defer until tip" semantics as emit messages
 %% however processes must be restored on wake, making them more complicated
 
-stitch_task(Base = #{name := _}, Node, Task, State) ->
+stitch_task(Base = #{name := _, yarn := Yarn}, Node, Task, State) ->
     %% if its a base message, assume deps and yarn are set already
-    erloom_surety:enqueue_task(Base, Node, Task, State);
+    State1 = defer_reply(Yarn, State),
+    erloom_surety:enqueue_task(Base, Node, Task, State1);
 stitch_task(Name, Node, Task, State = #{message := #{yarn := Yarn}}) ->
     %% thread with the yarn of the current message, if there is one that has one
     %% also add minimal deps on current message

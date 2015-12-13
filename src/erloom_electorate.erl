@@ -6,7 +6,7 @@
          handle_ballot/3,
          handle_ratify/3,
          handle_ctrl/3,
-         handle_task/4]).
+         task_completed/4]).
 
 create(_, _, State = #{elect := _}) ->
     State#{response => already_exists};
@@ -283,7 +283,7 @@ handle_ctrl(Ctrl = #{type := Type}, Node, State) ->
     State2 = imply_votes(Ctrl, Node, State1),
     State2#{response => ok}.
 
-handle_task(#{name := config}, Node, ConfId, State) ->
+task_completed(#{name := config}, Node, ConfId, State) ->
     case get_motion(ConfId, State) of
         undefined ->
             %% if the conf somehow disappears (maybe due to a fiat?), just do nothing

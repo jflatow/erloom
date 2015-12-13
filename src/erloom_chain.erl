@@ -90,9 +90,9 @@ value(State, Path) ->
 value(State, Path, Default) ->
     case util:lookup(State, Path, {Default, undefined}) of
         {Value, _} ->
-            Value;
+            util:def(Value, Default);
         {Value, _, _} ->
-            Value
+            util:def(Value, Default)
     end.
 
 version(State, Path) ->
@@ -101,7 +101,7 @@ version(State, Path) ->
 version(State, Path, Default) ->
     case util:lookup(State, Path, {undefined, Default}) of
         {_, Version} ->
-            Version;
+            util:def(Version, Default);
         {_, Version, _} ->
-            Version
+            util:def(Version, Default)
     end.
