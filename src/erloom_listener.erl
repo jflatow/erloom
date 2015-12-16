@@ -24,7 +24,10 @@ listen(catchup, State = #{status := awake, prior := _, emits := Emits}) ->
                     replay_logs(State);
                 [{_Key, Message}|Rest] ->
                     %% treat an emission as a new message to self
-                    work_on({new_message, Message, undefined}, State#{emits => Rest})
+                    work_on({new_message, Message, undefined}, State#{emits => Rest});
+                [{_Key, Message, Reply}|Rest] ->
+                    %% also allow setting the reply for emits
+                    work_on({new_message, Message, Reply}, State#{emits => Rest})
             end;
         false ->
             %% we are not at our tip, keep trying (i.e. we probably just recovered)

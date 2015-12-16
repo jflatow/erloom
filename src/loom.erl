@@ -179,6 +179,8 @@
          after_locus/1,
          after_point/1,
          defer_reply/2,
+         eject_reply/1,
+         eject_reply/2,
          maybe_reply/1,
          maybe_reply/2,
          maybe_reply/3,
@@ -202,7 +204,9 @@
 
 -export([change_peers/2]).
 
--export([stitch_yarn/2,
+-export([switch_message/2,
+         switch_unmuted/2,
+         stitch_yarn/2,
          suture_yarn/2,
          stitch_task/4,
          suture_task/4,
@@ -290,6 +294,8 @@ multircv(Spec, Message, Opts) ->
     {node(), apply(loom, call, [Spec, Message, Opts])}.
 
 %% 'patch' dispatches a message to a loom, but flattens the response
+%% in the case of another patch 3-tuple, throw away the subcontext for convenience
+%% the callee can always explicitly deal with it or pack it into the response
 
 patch(Specish, Message) ->
     patch(Specish, Message, #{}).
@@ -298,7 +304,11 @@ patch(Specish, Message, Ctx) ->
     case dispatch(Specish, Message, Ctx) of
         {ok, {ok, Response}, Ctx1} ->
             {ok, Response, Ctx1};
+        {ok, {ok, Response, _Ctx}, Ctx1} ->
+            {ok, Response, Ctx1};
         {ok, {error, Reason}, Ctx1} ->
+            {error, Reason, Ctx1};
+        {ok, {error, Reason, _Ctx}, Ctx1} ->
             {error, Reason, Ctx1};
         {ok, Response, Ctx1} ->
             {ok, Response, Ctx1};
@@ -545,6 +555,13 @@ defer_reply(Name, State = #{reply := Replies}) ->
             State#{reply => Replies#{default => Name, Name => Reply}}
     end.
 
+eject_reply(State) ->
+    eject_reply(default, State).
+
+eject_reply(Name, State = #{reply := Replies}) ->
+    {Reply, Replies1} = util:pop(Replies, Name),
+    {Reply, State#{reply => Replies1}}.
+
 maybe_reply(State) ->
     maybe_reply(util:get(State, response), State).
 
@@ -784,6 +801,16 @@ change_peers({'-', Nodes}, State) ->
     util:accrue(State, peers, [{except, Nodes}]);
 change_peers({'=', Nodes}, State) ->
     change_peers({'+', Nodes}, State#{peers => #{}}).
+
+%% Effectively switch the current message with another one
+%% Transfers the reply fun to a new emit at the front of the stack
+
+switch_message(Message, State) ->
+    {Reply, State1} = eject_reply(State),
+    util:modify(State1, emits, fun (E) -> [{undefined, Message, Reply}|E] end).
+
+switch_unmuted(Message, State) ->
+    switch_message(util:delete(Message, mute), State).
 
 %% Yarns serve 3 purposes:
 %%  1. Deferring replies to a message
