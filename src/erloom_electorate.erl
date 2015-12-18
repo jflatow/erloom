@@ -36,14 +36,14 @@ motion(Motion = #{fiat := _}, State) ->
                 type => motion,
                 conf => util:lookup(State, [elect, known])
                },
-    loom:stitch_yarn(min_refs(Motion1, State), State);
+    min_refs(Motion1, State);
 motion(Motion, State) ->
     %% not a fiat, voting predicated on currently believed conf
     Motion1 = Motion#{
                 type => motion,
                 conf => util:lookup(State, [elect, current])
                },
-    loom:stitch_yarn(min_refs(Motion1, State), State).
+    min_refs(Motion1, State).
 
 tether(Change = #{kind := batch, value := Batch}, State) ->
     Change1 = Change#{

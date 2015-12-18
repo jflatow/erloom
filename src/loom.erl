@@ -674,6 +674,10 @@ verify_message(Message, State) ->
             {retry, Reason, State}
     end.
 
+write_through(#{type := move}, _, _) ->
+    {0, infinity};
+write_through(#{type := tether}, _, _) ->
+    {0, infinity};
 write_through(#{mute := true}, _, _) ->
     {0, infinity};
 write_through(Message, N, State) ->
@@ -868,7 +872,7 @@ suture_task(Name, Node, Task, State) ->
     suture_task(#{name => Name, yarn => after_locus(State)}, Node, Task, State).
 
 make_motion(Motion, State) ->
-    erloom_electorate:motion(Motion, State).
+    stitch_yarn(erloom_electorate:motion(Motion, State), State).
 
 make_tether(Change, State) ->
-    erloom_electorate:tether(Change, State).
+    stitch_yarn(erloom_electorate:tether(Change, State), State).
