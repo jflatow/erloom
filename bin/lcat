@@ -15,13 +15,31 @@ add_paths() ->
     code:add_paths([RelPath ++ "/ebin",
                     RelPath ++ "/deps/erlkit/ebin"]).
 
-main(Homes) ->
-    add_paths(),
-    lists:foldl(fun (H, _) -> lcat(H) end, nil, Homes).
+get_opts(Args) ->
+    get_opts(Args, {[], []}).
 
-lcat(Home) ->
+get_opts(["-d"|Rest], {Args, Opts}) ->
+    get_opts(Rest, {Args, [{deps, true}|Opts]});
+get_opts(["-r"|Rest], {Args, Opts}) ->
+    get_opts(Rest, {Args, [{refs, true}|Opts]});
+get_opts(["-y"|Rest], {Args, Opts}) ->
+    get_opts(Rest, {Args, [{yarn, true}|Opts]});
+get_opts([Arg|Rest], {Args, Opts}) ->
+    get_opts(Rest, {[Arg|Args], Opts});
+get_opts([], {Args, Opts}) ->
+    {lists:reverse(Args), lists:reverse(Opts)}.
+
+main(Args) ->
+    add_paths(),
+    case get_opts(Args) of
+        {Homes, Opts} ->
+            lists:foldl(fun (H, _) -> lcat(H, Opts) end, nil, Homes)
+    end.
+
+lcat(Home, Opts) ->
+    LocusFmt = erloom_bin:locus_formatter(Opts),
+    MessageFmt = erloom_bin:message_formatter(Opts),
     erloom_logs:fold(
-      fun (Message, {{Node, IId}, {{R, A}, {R, B}}},  _) ->
-              io:format("~s ~s ~s ~8B ~8B ~s~n",
-                        [Node, IId, R, A, B, erloom_bin:format_message(Message)])
+      fun (Message, Locus,  _) ->
+              io:format("~s\t~s~n", [LocusFmt(Locus), MessageFmt(Message)])
       end, nil, Home).

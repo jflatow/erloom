@@ -25,7 +25,7 @@ home({agent, Name}) ->
 
 opts({agent, _}) ->
     #{
-      idle_timeout => time:timeout({5, minutes}),
+      idle_timeout => time:timeout({1, minutes}),
       wipe_timeout => time:timeout({5, seconds}),
       sync_interval => 3000 + random:uniform(3000),
       sync_push_prob => 0.5,

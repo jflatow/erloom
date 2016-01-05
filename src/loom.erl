@@ -53,9 +53,10 @@
              logs => erloom:logs(),
              ours => erloom:which(),
              prior => erloom:edge(),
-             front => erloom:edge(),
-             edges => erloom:edges(),
-             point => erloom:edge(),
+             front => erloom:edge(),                          %% edge after logs written
+             edges => erloom:edges(),                         %% edges of everyone else
+             point => erloom:edge(),                          %% edge after last handled
+             dirty => erloom:edge(),                          %% edge after last save
              locus => erloom:locus(),
              names => [],
              peers => #{node() => boolean()},
@@ -176,6 +177,7 @@
          start/2,
          stop/2,
          wipe/1,
+         clean/1,
          after_locus/1,
          after_point/1,
          defer_reply/2,
@@ -462,9 +464,12 @@ keep(State) ->
                           tasks], State),
     maps:merge(Builtins, callback(State, {keep, 1}, [State], #{})).
 
+save(State = #{point := Point, dirty := Point}) ->
+    %% to force a save, one could simply set dirty => true
+    State;
 save(State) ->
     ok = path:write(path(state, State), term_to_binary(keep(State))),
-    State.
+    clean(State).
 
 kept(State) ->
     binary_to_term(path:read(path(state, State), term_to_binary(#{}))).
@@ -483,7 +488,7 @@ load(State = #{home := _}) ->
      },
     Kept = maps:merge(Defaults, kept(State)),
     State1 = erloom_logs:load(State),
-    maps:merge(Kept, State1#{vsn => vsn(State1)});
+    clean(maps:merge(Kept, State1#{vsn => vsn(State1)}));
 load(State = #{spec := Spec}) ->
     load(State#{home => home(Spec), opts => opts(Spec)}).
 
@@ -530,6 +535,10 @@ wipe(#{home := Home}) ->
     %% that's ok, eventually we'll either wipe or get started again
     ok = path:rmrf(Home),
     exit(wiped).
+
+clean(State = #{point := Point}) ->
+    %% move dirty up to the point, prevents us from saving when there have been no changes
+    State#{dirty => Point}.
 
 maybe_upgrade(State = #{vsn := Vsn}) ->
     %% if the vsn of the code is greater than ours, we should emit a new vsn

@@ -133,10 +133,10 @@ fold(Fun, Acc, {Start, Stop}, State = #{logs := _, front := Front}) ->
         util:get(State2, acc)
     catch
         %% fold only as far as we can go
-        throw:{unreachable, _Target, S} ->
-            util:get(S, acc);
-        throw:{unsupported, _Vsn, S} ->
-            util:get(S, acc)
+        throw:{unreachable, Target, S} ->
+            throw({unreachable, Target, util:get(S, acc)});
+        throw:{unsupported, Vsn, S} ->
+            throw({unsupported, Vsn, util:get(S, acc)})
     end;
 fold(Fun, Acc, Range, Home) ->
     fold(Fun, Acc, Range, load_logs(#{home => Home})).
