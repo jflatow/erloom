@@ -207,7 +207,9 @@
 -export([change_peers/2]).
 
 -export([switch_message/2,
+         switch_message/3,
          switch_unmuted/2,
+         switch_unmuted/3,
          stitch_yarn/2,
          suture_yarn/2,
          stitch_task/4,
@@ -817,13 +819,29 @@ change_peers({'=', Nodes}, State) ->
 
 %% Effectively switch the current message with another one
 %% Transfers the reply fun to a new emit at the front of the stack
+%% We can also override the response value for the reply
 
 switch_message(Message, State) ->
     {Reply, State1} = eject_reply(State),
     util:modify(State1, emits, fun (E) -> [{undefined, Message, Reply}|E] end).
 
+switch_message(Message, Response, State) ->
+    {Reply, State1} = eject_reply(State),
+    util:modify(State1, emits,
+                fun (E) ->
+                        [{undefined, Message,
+                          fun (R) when is_function(Response) ->
+                                  Reply(Response(R));
+                              (_) ->
+                                  Reply(Response)
+                          end}|E]
+                end).
+
 switch_unmuted(Message, State) ->
     switch_message(util:delete(Message, mute), State).
+
+switch_unmuted(Message, Response, State) ->
+    switch_message(util:delete(Message, mute), Response, State).
 
 %% Yarns serve 3 purposes:
 %%  1. Deferring replies to a message

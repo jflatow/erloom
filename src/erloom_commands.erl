@@ -47,9 +47,9 @@ command(#{verb := accrue, path := Path, value := Value, kind := chain} = Command
 command(#{verb := accrue, path := Path, value := Value}, State) ->
     {{true, util:lookup(State, Path)}, util:accrue(State, Path, Value)};
 
-command(#{verb := create, path := Path, value := Value} = Command, State) ->
+command(#{verb := create, path := Path, value := Value, kind := chain} = Command, State) ->
     erloom_chain:create(State, Path, {Value, version(Command, State)}, #{wrapped => true});
-command(#{verb := create, path := Path, value := Value, kind := chain}, State) ->
+command(#{verb := create, path := Path, value := Value}, State) ->
     util:create(State, Path, Value, #{wrapped => true});
 
 command(#{verb := remove, path := Path, kind := chain}, State) ->
