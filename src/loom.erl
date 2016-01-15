@@ -180,13 +180,15 @@
          clean/1,
          after_locus/1,
          after_point/1,
+         alter_reply/2,
+         alter_reply/3,
          defer_reply/2,
          eject_reply/1,
          eject_reply/2,
          maybe_reply/1,
          maybe_reply/2,
          maybe_reply/3,
-         no_reply/1,
+         wait/1,
          unmet_needs/2,
          verify_message/2,
          write_through/3,
@@ -207,9 +209,7 @@
 -export([change_peers/2]).
 
 -export([switch_message/2,
-         switch_message/3,
          switch_unmuted/2,
-         switch_unmuted/3,
          stitch_yarn/2,
          suture_yarn/2,
          stitch_task/4,
@@ -553,6 +553,19 @@ maybe_upgrade(State = #{vsn := Vsn}) ->
             State
     end.
 
+alter_reply(Alteration, State) ->
+    alter_reply(Alteration, default, State).
+
+alter_reply(Alteration, Name, State = #{reply := Replies}) ->
+    case util:get(Replies, Name) of
+        undefined ->
+            State;
+        Reply when is_function(Reply) ->
+            State#{reply => Replies#{Name => fun (R) -> Reply(Alteration(R)) end}};
+        Reply ->
+            alter_reply(Alteration, Reply, State)
+    end.
+
 defer_reply(Name, State = #{reply := Replies}) ->
     %% defer the default reply, if any, to name
     %%  and make sure calling default actually calls name
@@ -594,8 +607,9 @@ maybe_reply(Name, Response, State) ->
             maybe_reply(Reply, Response, util:remove(State, [reply, Name]))
     end.
 
-no_reply(State) ->
+wait(State) ->
     %% setting response to undefined, or removing it, disables the default response
+    %% in general this means we are going to respond later, hence the name 'wait'
     util:delete(State, response).
 
 after_locus(#{locus := Locus}) ->
@@ -819,29 +833,13 @@ change_peers({'=', Nodes}, State) ->
 
 %% Effectively switch the current message with another one
 %% Transfers the reply fun to a new emit at the front of the stack
-%% We can also override the response value for the reply
 
 switch_message(Message, State) ->
     {Reply, State1} = eject_reply(State),
     util:modify(State1, emits, fun (E) -> [{undefined, Message, Reply}|E] end).
 
-switch_message(Message, Response, State) ->
-    {Reply, State1} = eject_reply(State),
-    util:modify(State1, emits,
-                fun (E) ->
-                        [{undefined, Message,
-                          fun (R) when is_function(Response) ->
-                                  Reply(Response(R));
-                              (_) ->
-                                  Reply(Response)
-                          end}|E]
-                end).
-
 switch_unmuted(Message, State) ->
     switch_message(util:delete(Message, mute), State).
-
-switch_unmuted(Message, Response, State) ->
-    switch_message(util:delete(Message, mute), Response, State).
 
 %% Yarns serve 3 purposes:
 %%  1. Deferring replies to a message

@@ -54,14 +54,15 @@ handle_message(#{do := save}, _Node, true, State) ->
 handle_message(#{do := get_state}, _Node, true, State) ->
     State#{response => State};
 handle_message(#{do := emit}, _Node, true, State) ->
-    loom:no_reply(loom:stitch_yarn(#{do => reply}, State));
+    loom:wait(loom:stitch_yarn(#{do => reply}, State));
 handle_message(#{do := task}, Node, true, State) ->
     Task = {fun ?MODULE:do_task/3, nil},
-    loom:no_reply(loom:stitch_task(task_reply, Node, Task, State));
+    loom:wait(loom:stitch_task(task_reply, Node, Task, State));
 handle_message(#{do := reply}, _Node, true, State) ->
     State#{response => got_it};
 handle_message(#{do := switch}, _Node, true, State) ->
-    loom:switch_message(#{did => switch}, State);
+    State1 = loom:alter_reply(fun (switched) -> {ok, switched} end, State),
+    loom:switch_message(#{did => switch}, State1);
 handle_message(#{did := switch}, _Node, true, State) ->
     State#{response => switched};
 handle_message(#{type := start}, Node, true, State) ->
