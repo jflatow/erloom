@@ -32,7 +32,7 @@
                vsn => vsn(),
                deps => erloom:edge(),
                refs => erloom:loci(),
-               type => (upgrade | sleep | start | stop |
+               type => (upgrade | save | sleep | start | stop |
                         command | motion | ballot | ratify |
                         move | tether | fence | task | atom()),
                kind => atom(),
@@ -272,8 +272,9 @@ call(Spec, Message, Opts) ->
 
 %% 'state' gets a recent snapshot of the loom state (i.e. for debugging)
 
-state(Spec) ->
-    call(Spec, get_state).
+state(Specish) ->
+    {ok, State, _} = patch(Specish, get_state),
+    State.
 
 %% 'rpc' conveniently wrap calls to looms on other nodes
 
@@ -281,7 +282,7 @@ rpc(Node, Spec, Message) ->
     rpc(Node, Spec, Message, []).
 
 rpc(Node, Spec, Message, Opts) ->
-    {Timeout, Opts1} = util:default(Opts, timeout, 30000),
+    {Timeout, Opts1} = util:default(Opts, [timeout], 30000),
     rpc:call(Node, loom, call, [Spec, Message, Opts1], Timeout).
 
 %% 'multirpc' and 'multircv' conveniently wrap calls to multiple nodes
@@ -290,7 +291,7 @@ multirpc(Nodes, Spec, Message) ->
     multirpc(Nodes, Spec, Message, []).
 
 multirpc(Nodes, Spec, Message, Opts) ->
-    {Timeout, Opts1} = util:default(Opts, timeout, 30000),
+    {Timeout, Opts1} = util:default(Opts, [timeout], 30000),
     {Replies, BadNodes} = rpc:multicall(Nodes, loom, multircv, [Spec, Message, Opts1], Timeout),
     maps:merge(maps:from_list(Replies), util:mapped(BadNodes, {error, noreply})).
 
@@ -403,10 +404,13 @@ vsn(Spec) ->
 %% 'find' takes a spec or something similar and returns the exact spec and nodes
 %% when it's unknown which nodes a loom is running on, this is where to look
 %% can block for an arbitrarily long time, and may return an error
+%% its up to the callback module to define what other forms of spec are accepted
 
 find(Specish) ->
     find(Specish, #{}).
 
+find(#{spec := Spec}, Ctx) ->
+    find(Spec, Ctx);
 find(Specish, Ctx) ->
     callback(Specish, {find, 2}, [Specish, Ctx], {ok, {Specish, [node()]}, Ctx}).
 
@@ -721,12 +725,14 @@ handle_info(Info, State) ->
 cancel_builtin(#{yarn := Yarn}, Node, false, State) when Node =:= node() ->
     %% cancel pending emit of a yarn every time we see one replayed
     %% don't do this for new messages, since they are already popped off the stack
-    util:modify(State, emits, fun (E) -> lists:keydelete({node(), Yarn}, 1, E) end);
+    util:modify(State, [emits], fun (E) -> lists:keydelete({node(), Yarn}, 1, E) end);
 cancel_builtin(_Message, _Node, _IsNew, State) ->
     State.
 
 handle_builtin(#{type := upgrade, vsn := Vsn}, Node, _, State) ->
     util:modify(State, [vsns, Node], Vsn);
+handle_builtin(#{type := save}, _, true, State) ->
+    save(maybe_reply(ok, State));
 handle_builtin(#{type := sleep}, _, true, State) ->
     sleep(maybe_reply({goodnight, moon}, State));
 
@@ -825,9 +831,9 @@ callback(Spec, {Fun, Arity}, Args, Default) when is_tuple(Spec) ->
     callback(element(1, Spec), {Fun, Arity}, Args, Default).
 
 change_peers({'+', Nodes}, State) ->
-    util:accrue(State, peers, [{addnew, util:mapped(Nodes)}, {except, [node()]}]);
+    util:accrue(State, [peers], [{addnew, util:mapped(Nodes)}, {except, [node()]}]);
 change_peers({'-', Nodes}, State) ->
-    util:accrue(State, peers, [{except, Nodes}]);
+    util:accrue(State, [peers], [{except, Nodes}]);
 change_peers({'=', Nodes}, State) ->
     change_peers({'+', Nodes}, State#{peers => #{}}).
 
@@ -836,7 +842,7 @@ change_peers({'=', Nodes}, State) ->
 
 switch_message(Message, State) ->
     {Reply, State1} = eject_reply(State),
-    util:modify(State1, emits, fun (E) -> [{undefined, Message, Reply}|E] end).
+    util:modify(State1, [emits], fun (E) -> [{undefined, Message, Reply}|E] end).
 
 switch_unmuted(Message, State) ->
     switch_message(util:delete(Message, mute), State).
@@ -851,7 +857,7 @@ stitch_yarn(Message = #{yarn := Yarn}, State) ->
     %% yarns always defer replies (i.e. we should eventually reply, now or later)
     %% if the yarn is specified, assume deps are too
     State1 = defer_reply(Yarn, State),
-    util:modify(State1, emits, fun (E) -> E ++ [{{node(), Yarn}, Message}] end);
+    util:modify(State1, [emits], fun (E) -> E ++ [{{node(), Yarn}, Message}] end);
 stitch_yarn(Message, State = #{message := #{yarn := Yarn}}) ->
     %% thread with the yarn of the current message, if there is one that has one
     %% also add minimal deps on current message

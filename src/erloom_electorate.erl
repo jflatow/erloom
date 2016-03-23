@@ -174,7 +174,7 @@ delete_motion(MotionId, Motion, State = #{elect := Elect}) ->
             {Kids, Parent, Votes} ->
                 util:set(Elect, ConfId, {lists:delete(MotionId, Kids), Parent, Votes})
         end,
-    util:set(State, elect, util:remove(Elect1, MotionId)).
+    util:set(State, elect, util:delete(Elect1, MotionId)).
 
 has_right_electorate(Motion, #{elect := #{current := ConfId}}) ->
     case get_conf_id(Motion) of

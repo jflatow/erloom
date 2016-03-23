@@ -42,7 +42,7 @@ create(State, Path, Initial) ->
     create(State, Path, Initial, []).
 
 create(State, Path, Initial, Opts) ->
-    swap(State, Path, Initial, util:set(Opts, match, fun (E) -> element(1, E) =:= undefined end)).
+    swap(State, Path, Initial, util:set(Opts, match, util:get(Opts, match, fun (E) -> element(1, E) =:= undefined end))).
 
 remove(State, Path) ->
     remove(State, Path, []).

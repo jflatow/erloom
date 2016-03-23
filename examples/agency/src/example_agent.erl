@@ -1,4 +1,4 @@
--module(agent).
+-module(example_agent).
 
 -behavior(loom).
 -export([vsn/1,
@@ -18,12 +18,12 @@
 -export([do_task/3]).
 
 vsn(_) ->
-    #{agent => {2, 0, 0}}.
+    #{?MODULE => {2, 0, 0}}.
 
-home({agent, Name}) ->
+home({?MODULE, Name}) ->
     filename:join([var, url:esc(node()), Name]).
 
-opts({agent, _}) ->
+opts({?MODULE, _}) ->
     #{
       idle_timeout => time:timeout({1, minutes}),
       wipe_timeout => time:timeout({5, seconds}),
