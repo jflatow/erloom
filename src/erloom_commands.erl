@@ -32,6 +32,10 @@ command(#{verb := lookup, path := Path, kind := probe}, State) ->
         MotionId ->
             State#{response => {wait, MotionId}}
     end;
+command(#{verb := lookup, path := Path, kind := chain, value := Value}, State) ->
+    State#{response => {ok, {false, util:op(erloom_chain:value(State, Path), Value)}}};
+command(#{verb := lookup, path := Path, value := Value}, State) ->
+    State#{response => {ok, {false, util:op(util:lookup(State, Path), Value)}}};
 command(#{verb := lookup, path := Path, kind := chain}, State) ->
     State#{response => {ok, {false, erloom_chain:value(State, Path)}}};
 command(#{verb := lookup, path := Path}, State) ->
