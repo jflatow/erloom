@@ -149,11 +149,16 @@
          call/2,
          call/3,
          state/1,
+         ok/1,
          rpc/3,
          rpc/4,
          multirpc/3,
          multirpc/4,
          multircv/3,
+         drive/1,
+         drive/2,
+         steer/1,
+         steer/2,
          patch/2,
          patch/3,
          dispatch/2,
@@ -162,7 +167,6 @@
          deliver/4]).
 
 -export([vsn/1,
-         find/1,
          find/2,
          proc/1,
          home/1,
@@ -222,7 +226,7 @@
 %% assuming the message is persisted (write_through not overridden)
 
 seed(Specish) ->
-    case find(Specish) of
+    case find(Specish, #{}) of
         {ok, {Spec, Nodes}, _} ->
             seed(Spec, Nodes);
         {error, Reason, _} ->
@@ -273,8 +277,16 @@ call(Spec, Message, Opts) ->
 %% 'state' gets a recent snapshot of the loom state (i.e. for debugging)
 
 state(Specish) ->
-    {ok, State, _} = patch(Specish, get_state),
-    State.
+    patch(Specish, get_state).
+
+%% 'ok' extracts normal responses and turns abnormal responses into errors
+
+ok({ok, Normal, _}) ->
+    Normal;
+ok({throw, Error, Ctx}) ->
+    throw({Error, Ctx});
+ok({error, Error, Ctx}) ->
+    error({Error, Ctx}).
 
 %% 'rpc' conveniently wrap calls to looms on other nodes
 
@@ -298,12 +310,53 @@ multirpc(Nodes, Spec, Message, Opts) ->
 multircv(Spec, Message, Opts) ->
     {node(), apply(loom, call, [Spec, Message, Opts])}.
 
+
+%% 'drive' and 'steer' allow the callee to direct the caller what to do next
+%% so the client need not know how to do anything in particular, like a user-agent
+%% basically a trampoline for looms
+%% differentiates between error, exception, continuation, and return:
+%%   {ok, Return, _}
+%%   {ok, Continue := #{which := _, message := _, [return := Override]}, _}
+%%   {_, Exception := #{error := _}, _}
+%%   {error, Error, _}
+%% NB: a loom should not call itself, or it may block indefinitely
+%%     same applies if drive is called from a loom and it is redirected to itself
+
+drive(Delivery) ->
+    drive(Delivery, undefined).
+
+drive({ok, Result, Ctx}, Return) ->
+    case steer(Result, Ctx) of
+        {ok, Value, Ctx1} when Return =:= undefined ->
+            {ok, Value, Ctx1};
+        {ok, Value, Ctx1}  when is_function(Return) ->
+            {ok, Return(Value), Ctx1};
+        {ok, _, Ctx1} ->
+            {ok, Return, Ctx1};
+        Abnormal ->
+            Abnormal
+    end;
+drive({error, Throw = #{error := _}, Ctx}, _) ->
+    {throw, Throw, Ctx};
+drive({error, Error, Ctx}, _) ->
+    {error, Error, Ctx}.
+
+steer(Instruction) ->
+    loom:ok(steer(Instruction, #{})).
+
+steer(Throw = #{error := _}, Ctx) ->
+    {throw, Throw, Ctx};
+steer(Patch = #{which := Which, message := Message}, Ctx) ->
+    drive(loom:patch(Which, Message, Ctx), util:get(Patch, return));
+steer(Other, Ctx) ->
+    {ok, Other, Ctx}.
+
 %% 'patch' dispatches a message to a loom, but flattens the response
 %% in the case of another patch 3-tuple, throw away the subcontext for convenience
 %% the callee can always explicitly deal with it or pack it into the response
 
 patch(Specish, Message) ->
-    patch(Specish, Message, #{}).
+    loom:ok(patch(Specish, Message, #{})).
 
 patch(Specish, Message, Ctx) ->
     case dispatch(Specish, Message, Ctx) of
@@ -324,7 +377,7 @@ patch(Specish, Message, Ctx) ->
 %% 'dispatch' tries to find and deliver a message to a loom
 
 dispatch(Specish, Message) ->
-    dispatch(Specish, Message, #{}).
+    loom:ok(dispatch(Specish, Message, #{})).
 
 dispatch(Specish, Message, Ctx) ->
     case find(Specish, Ctx) of
@@ -342,7 +395,7 @@ dispatch(Specish, Message, Ctx) ->
 %% we retry as many times as desired, or the caller can retry
 
 deliver(Nodes, Spec, Message) ->
-    deliver(Nodes, Spec, Message, #{}).
+    loom:ok(deliver(Nodes, Spec, Message, #{})).
 
 deliver(Nodes, Spec, Message, Ctx) ->
     deliver(Nodes, Spec, Message, Ctx, [], Nodes).
@@ -405,9 +458,6 @@ vsn(Spec) ->
 %% when it's unknown which nodes a loom is running on, this is where to look
 %% can block for an arbitrarily long time, and may return an error
 %% its up to the callback module to define what other forms of spec are accepted
-
-find(Specish) ->
-    find(Specish, #{}).
 
 find(#{spec := Spec}, Ctx) ->
     find(Spec, Ctx);

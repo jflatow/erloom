@@ -337,7 +337,7 @@ maybe_voted(MotionId, Node, Vote, State) ->
     %% apply vote for node if the motion is open and the node hasn't yet voted
     util:swap(State, [elect, MotionId],
               fun ({Kids, Motion, Votes}) when is_map(Votes) ->
-                      {Kids, Motion, util:create(Votes, Node, Vote)};
+                      {Kids, Motion, util:create(Votes, [Node], Vote)};
                   ({Kids, Motion, Other}) ->
                       {Kids, Motion, Other}
               end).
