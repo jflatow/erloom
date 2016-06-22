@@ -1,4 +1,5 @@
 -module(erloom_sync).
+-author("Jared Flatow").
 
 -export([do_push/2,
          maybe_push/1,

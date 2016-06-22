@@ -1,4 +1,5 @@
 -module(erloom_worker).
+-author("Jared Flatow").
 
 -export([spawn/1]).
 

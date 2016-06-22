@@ -1,4 +1,5 @@
 -module(loom).
+-author("Jared Flatow").
 
 -export_type([spec/0,
               home/0,
@@ -34,12 +35,12 @@
                refs => erloom:loci(),
                type => (upgrade | save | sleep | start | stop |
                         command | motion | ballot | ratify |
-                        move | tether | fence | task | atom()),
+                        move | tether | fence | task | continue | atom()),
                kind => atom(),
                yarn => term(),
                mute => boolean()
               }.
--type reply() :: fun((term()) -> term()).
+-type reply() :: fun((term()) -> term()) | undefined.
 -type state() :: #{
              listener => pid(),
              worker => pid(),
@@ -63,12 +64,13 @@
              wrote => {non_neg_integer(), non_neg_integer()},
              cache => #{node() => {pid() | undefined, non_neg_integer()}},
              elect => #{},
-             emits => [{term(), message()}],
+             emits => [{term(), message()} | {term(), message(), reply()}],
              tasks => #{term() => {pid() | undefined, {module(), atom(), list()}}},
              reply => #{},
              message => message() | undefined,
              response => term(),
-             former => term()
+             former => term(),
+             tokens => #{}
             }.
 
 -type command() :: #{ %% + message()
@@ -112,7 +114,7 @@
     {non_neg_integer(), non_neg_integer()}.
 -callback handle_idle(state()) -> state().
 -callback handle_info(term(), state()) -> state().
--callback handle_message(message(), node(), boolean(), state()) -> state().
+-callback handle_message(message() | {term(), term()}, node(), boolean(), state()) -> state().
 -callback command_called(command(), node(), boolean(), state()) -> state().
 -callback vote_on_motion(motion(), node(), state()) -> {vote(), state()}.
 -callback motion_decided(motion(), node(), decision(), state()) -> state().
@@ -212,7 +214,9 @@
 
 -export([change_peers/2]).
 
--export([switch_message/2,
+%% emissions
+-export([emit/2,
+         switch_message/2,
          switch_unmuted/2,
          stitch_yarn/2,
          suture_yarn/2,
@@ -220,6 +224,18 @@
          suture_task/4,
          make_motion/2,
          make_tether/2]).
+
+%% continuations
+-export([create_continuation/2,
+         create_continuation/3,
+         obtain_continuation/2,
+         obtain_continuation/3]).
+
+%% token management
+-export([is_valid_token/2,
+         create_token/3,
+         forget_token/2,
+         purge_tokens/1]).
 
 %% 'seed' (or equivalent) must be called before a loom can be used
 %% it is called only the first time the loom is *ever* used,
@@ -517,7 +533,8 @@ keep(State) ->
                           peers,
                           emits,
                           elect,
-                          tasks], State),
+                          tasks,
+                          tokens], State),
     maps:merge(Builtins, callback(State, {keep, 1}, [State], #{})).
 
 save(State = #{point := Point, dirty := Point}) ->
@@ -540,7 +557,8 @@ load(State = #{home := _}) ->
       emits => [],
       tasks => #{},
       cache => #{},
-      reply => #{}
+      reply => #{},
+      tokens => #{}
      },
     Kept = maps:merge(Defaults, kept(State)),
     State1 = erloom_logs:load(State),
@@ -560,7 +578,8 @@ waken(State) ->
     %% we were previously not awake, give a chance to liven the state
     State1 = erloom_surety:restart_tasks(State#{status => awake}),
     State2 = maybe_upgrade(State1),
-    callback(State2, {waken, 1}, [State2], State2).
+    State3 = purge_tokens(State2),
+    callback(State3, {waken, 1}, [State3], State3).
 
 sleep(State) ->
     State1 = save(State),
@@ -733,6 +752,14 @@ ready_to_accept(_Message, #{status := awake}) ->
 ready_to_accept(_Message, #{status := Status}) ->
     {false, Status}.
 
+verify_message(#{type := continue, token := Token} = Message, State) ->
+    %% reject continuations with a bad token
+    case is_valid_token(State, {continue, Token}) of
+        true ->
+            {ok, Message, State};
+        false ->
+            {error, #{error => bad_token}, State}
+    end;
 verify_message(Message, State) ->
     %% should we even accept the message?
     %% at a minimum:
@@ -811,6 +838,13 @@ handle_builtin(Message = #{type := command}, Node, _, State) ->
 handle_builtin(Message = #{type := task}, Node, _, State) ->
     %% task messages are for the surety to either retry or complete a task
     erloom_surety:handle_task(Message, Node, State);
+
+handle_builtin(Message = #{type := continue, token := Token}, Node, IsNew, State) ->
+    %% calls handle_message with a tuple, which never happens elsewhere
+    %% this allows handlers to handle continuations inline, but affects the spec
+    Frame = util:lookup(State, [tokens, {continue, Token}, frame]),
+    handle_message({util:get(Message, param), Frame}, Node, IsNew, State);
+
 handle_builtin(_Message, _Node, _IsNew, State) ->
     State#{response => ok}.
 
@@ -887,6 +921,13 @@ change_peers({'-', Nodes}, State) ->
 change_peers({'=', Nodes}, State) ->
     change_peers({'+', Nodes}, State#{peers => #{}}).
 
+%% Emit a message to be handled next, before any other messages are received
+%% Typically only do this with muted or new messages, otherwise happens every replay
+%% Same goes below for switching the message (which also transfers the reply)
+
+emit(Message, State) ->
+    util:modify(State, [emits], fun (E) -> [{undefined, Message, undefined}|E] end).
+
 %% Effectively switch the current message with another one
 %% Transfers the reply fun to a new emit at the front of the stack
 
@@ -957,3 +998,79 @@ make_motion(Motion, State) ->
 
 make_tether(Change, State) ->
     stitch_yarn(erloom_electorate:tether(Change, State), State).
+
+%% continuations
+%%
+%% the continuation token is left in the state and can be handed out externally
+%% if the loom receives a continue message with the token (and an optional param),
+%% the {Param, Frame} will be used to call handle_message
+
+create_continuation(Frame, State) ->
+    create_continuation(Frame, {3, days}, State).
+
+create_continuation(Frame, LifeTime, State) ->
+    %% the frame gives the context for the continuation
+    %% the continuation token can be retrieved from the state
+    Token = base64url:encode(crypto:rand_bytes(48)),
+    Create = #{
+      type => command,
+      verb => create,
+      path => [tokens, {continue, Token}],
+      value => #{
+        expiration => time:unix(time:pass(LifeTime)),
+        frame => Frame
+       }
+     },
+    loom:emit(Create, State#{continuation => Token}).
+
+obtain_continuation(Frame, State) ->
+    obtain_continuation(Frame, {{2, days}, {3, days}}, State).
+
+obtain_continuation(Frame, {MinLifeTime, MaxLifeTime}, State) ->
+    Exp = time:unix(time:pass(MinLifeTime)),
+    Fun =
+        fun ({{continue, T}, #{frame := F, expiration := E}}, _) when F =:= Frame, E > Exp ->
+                T;
+            (_, A) ->
+                A
+        end,
+    case util:fold(Fun, undefined, util:get(State, tokens)) of
+        undefined ->
+            create_continuation(Frame, MaxLifeTime, State);
+        Token ->
+            State#{continuation => Token}
+    end.
+
+%% token management
+%%
+%% tokens are just secrets kept by the loom and associated with a value
+%% tokens can expire, they can be used e.g. to ensure a client is allowed to connect
+%% looms may use tokens for shared secrets in other types of messages
+%% internally they are used to enable continuations
+
+is_valid_token(State, Token) ->
+    Now = time:unix(),
+    case util:lookup(State, [tokens, Token]) of
+        undefined ->
+            false;
+        #{expiration := Exp} when Exp < Now ->
+            false;
+        #{} ->
+            true
+    end.
+
+create_token(State, Token, Value = #{}) ->
+    util:modify(State, [tokens, Token], Value).
+
+forget_token(State, Token) ->
+    util:remove(State, [tokens, Token]).
+
+purge_tokens(State = #{tokens := Tokens}) ->
+    Now = time:unix(),
+    Tokens1 =
+        util:fold(fun ({_, #{expiration := Exp}}, Acc) when Exp < Now ->
+                          Acc;
+                      ({T, V}, Acc) ->
+                          util:set(Acc, T, V)
+                  end, #{}, Tokens),
+    State#{tokens => Tokens1}.

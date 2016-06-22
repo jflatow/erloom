@@ -1,4 +1,5 @@
 -module(erloom_registry).
+-author("Jared Flatow").
 
 %% The registry is started when erloom is run as an application.
 %% This is the default usage, and by default looms use it to find or spawn pids.

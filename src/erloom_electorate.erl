@@ -1,4 +1,5 @@
 -module(erloom_electorate).
+-author("Jared Flatow").
 
 -export([motion/2,
          tether/2,

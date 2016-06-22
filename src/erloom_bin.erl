@@ -1,4 +1,5 @@
 -module(erloom_bin).
+-author("Jared Flatow").
 
 -export([locus_formatter/1,
          message_formatter/1]).

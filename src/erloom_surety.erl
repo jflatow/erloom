@@ -11,6 +11,7 @@ enqueue_task(Base = #{name := Name}, Node, Task, State = #{tasks := Tasks, opts 
     %% just insert into the table, it gets run once tasks are launched
     %% the task only gets launched on the specified node, but all nodes are aware of it
     %% this means tasks with the same name are queued globally, which is very useful
+    %% typically only the node that receives the trigger message should launch the task
     %% messages emitted by the task will be based on the base
     %% generally it should depend at least on whatever triggered the task
     %%  one may also embed a yarn inside the base

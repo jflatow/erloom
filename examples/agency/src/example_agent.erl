@@ -73,6 +73,12 @@ handle_message(#{type := stop}, Node, true, State) ->
     State;
 handle_message(#{write := _}, _, true, State = #{wrote := Wrote}) ->
     State#{response => Wrote};
+handle_message(#{make := continue}, _, true, State) ->
+    State1 = loom:obtain_continuation(the_frame, State),
+    State1#{response => util:get(State1, continuation)};
+handle_message({Param, the_frame}, Node, _, State) ->
+    io:format("~p continued with ~p~n", [Node, Param]),
+    State;
 handle_message(Message, Node, true, State) ->
     io:format("~p new message: ~256p~n", [Node, Message]),
     State;

@@ -1,4 +1,5 @@
 -module(erloom_chain).
+-author("Jared Flatow").
 
 %% erloom api
 -export([lookup/2,

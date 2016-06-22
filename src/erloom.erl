@@ -1,4 +1,5 @@
 -module(erloom).
+-author("Jared Flatow").
 
 -export_type([logid/0,
               mark/0,

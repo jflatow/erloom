@@ -1,4 +1,5 @@
 -module(erloom_logs).
+-author("Jared Flatow").
 
 -export([load/1,
          path/2,

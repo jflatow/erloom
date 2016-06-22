@@ -1,4 +1,5 @@
 -module(erloom_commands).
+-author("Jared Flatow").
 
 -export([handle_command/3]).
 
