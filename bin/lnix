@@ -25,9 +25,9 @@ lnix([Root|Rest], {Rel, Offs} = Mark) ->
     MessageFmt = erloom_bin:message_formatter([]), %% XXX opts
     {ok, Log} = log:open(Root),
     {ok, Data} = log:annul(Log, Mark),
+    {ok, _} = log:close(Log),
     ok = io:format("~s ~s ~8B\t~s~n",
                    [Root, Rel, Offs, MessageFmt(binary_to_term(Data))]),
-    ok = log:close(Log),
     lnix(Rest, Mark);
 lnix([], _) ->
     ok.

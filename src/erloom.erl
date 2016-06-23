@@ -46,10 +46,13 @@
 -define(Child(Mod, Args, Type), {Mod, {Mod, start, Args}, permanent, 5000, Type, [Mod]}).
 -define(Children, [?Child(erloom_registry, [], worker)]).
 
--export([delta_lower/1,
+-export([delta_bound/2,
+         delta_lower/1,
          delta_upper/1,
          edge_delta/2,
+         edge_delta/3,
          edge_hull/2,
+         edge_hull/3,
          edges_max/2,
          locus_node/1,
          locus_before/1,
@@ -90,6 +93,11 @@ init([]) ->
 
 %% erloom
 
+delta_bound(D, forward) ->
+    delta_upper(D);
+delta_bound(D, reverse) ->
+    delta_lower(D).
+
 delta_lower(D) ->
     util:map(D, fun ({L, _}) -> L end).
 
@@ -97,19 +105,35 @@ delta_upper(D) ->
     util:map(D, fun ({_, U}) -> U end).
 
 edge_delta(X, Y) ->
+    edge_delta(X, Y, forward).
+
+edge_delta(X, Y, Dir) ->
     maps:fold(fun (Node, XMark, Delta) ->
                       case maps:get(Node, Y, undefined) of
-                          YMark when YMark < XMark ->
+                          undefined when Dir =:= forward ->
+                              Delta#{Node => {undefined, XMark}};
+                          undefined when Dir =:= reverse ->
+                              Delta#{Node => {XMark, undefined}};
+                          YMark when YMark < XMark, Dir =:= forward ->
                               Delta#{Node => {YMark, XMark}};
+                          YMark when XMark < YMark, Dir =:= reverse ->
+                              Delta#{Node => {XMark, YMark}};
                           _ ->
                               Delta
                       end
               end, #{}, X).
 
 edge_hull(X, Y) ->
+    edge_hull(X, Y, forward).
+
+edge_hull(X, Y, Dir) ->
     maps:fold(fun (Node, XMark, Max) ->
                       case maps:get(Node, Y, undefined) of
-                          YMark when YMark < XMark ->
+                          undefined ->
+                              Max#{Node => XMark};
+                          YMark when YMark < XMark, Dir =:= forward ->
+                              Max#{Node => XMark};
+                          YMark when XMark < YMark, Dir =:= reverse ->
                               Max#{Node => XMark};
                           _ ->
                               Max

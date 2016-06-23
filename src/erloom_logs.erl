@@ -7,30 +7,35 @@
          close/1,
          obtain/2,
          fold/3,
-         fold/4,
-         range/1,
-         range/2,
          replay/3,
          replay/4,
          slice/4,
          extend/4,
          write/2]).
 
+ls(Path, forward) ->
+    path:ls(Path);
+ls(Path, reverse) ->
+    lists:reverse(ls(Path, forward)).
+
 load(State) ->
     load_ours(load_logs(State)).
 
 load_logs(State) ->
-    load_logs(path:list(loom:path(logs, State)), State#{logs => #{}, front => #{}}).
+    load_logs(State, forward).
 
-load_logs(NodePaths, State) ->
-    lists:foldl(fun load_node/2, State, NodePaths).
+load_logs(State, Direction) ->
+    load_logs(path:list(loom:path(logs, State)), State#{logs => #{}, front => #{}}, Direction).
 
-load_node(NodePath, State) ->
+load_logs(NodePaths, State, Direction) ->
+    lists:foldl(fun (P, S) -> load_node(P, S, Direction) end, State, NodePaths).
+
+load_node(NodePath, State, Direction) ->
     Node = util:atom(url:unescape(filename:basename(NodePath))),
-    IIds = [util:bin(I) || I <- lists:reverse(path:ls(NodePath))],
-    load_node(Node, IIds, State).
+    IIds = [util:bin(I) || I <- lists:reverse(ls(NodePath, Direction))],
+    load_node(Node, IIds, State, Direction).
 
-load_node(Node, [IId|Rest], State = #{front := Front}) ->
+load_node(Node, [IId|Rest], State = #{front := Front}, Direction) ->
     case empty({Node, IId}, State) of
         {true, _Log, State1} ->
             %% dont load or use the front from empty logs
@@ -39,11 +44,14 @@ load_node(Node, [IId|Rest], State = #{front := Front}) ->
             %% it *can* also happen if we die in the middle of a sync:
             %%  in that case we will open the new log later
             load_node(Node, Rest, State1);
-        {false, Log, State1} ->
+        {false, Log, State1} when Direction =:= forward ->
             %% if the log has entries we're good, update the front accordingly
-            State1#{front => Front#{Node => {IId, log:locus(Log)}}}
+            State1#{front => Front#{Node => {IId, log:locus(Log)}}};
+        {false, Log, State1} when Direction =:= reverse ->
+            %% if we're going in reverse, use the first position in the log
+            State1#{front => Front#{Node => {IId, log:zilch(Log)}}}
     end;
-load_node(_, [], State) ->
+load_node(_, [], State, _) ->
     State.
 
 load_ours(State) ->
@@ -86,7 +94,10 @@ path(Node, State) ->
     loom:path([logs, url:esc(Node)], State).
 
 first_id(Node, State) ->
-    case path:ls(path(Node, State)) of
+    first_id(Node, State, forward).
+
+first_id(Node, State, Direction) ->
+    case ls(path(Node, State), Direction) of
         [] ->
             throw({no_logs, Node});
         [Name|_] ->
@@ -94,7 +105,10 @@ first_id(Node, State) ->
     end.
 
 next_id(Which, State) ->
-    case path:next(path(Which, State)) of
+    next_id(Which, State, forward).
+
+next_id(Which, State, Direction) ->
+    case path:next(path(Which, State), Direction) of
         undefined ->
             throw({no_next_log, Which});
         Path ->
@@ -120,54 +134,76 @@ obtain(Which, State = #{logs := Logs}) ->
             {Log, State}
     end.
 
-%% fold logs in a more traditional way, using state or home (not used internally)
+%% fold over logs, as needed by the outside world (not used internally by loom)
+%% can perform fold given either state or home directory, and can limit num folds
 
-fold(Fun, Acc, State) ->
-    fold(Fun, Acc, {undefined, undefined}, State).
-
-fold(Fun, Acc, {Start, Stop}, State = #{logs := _, front := Front}) ->
+fold(Fun, Acc, #{
+            logs := _,
+            front := Front,
+            range := {Start, Stop},
+            direction := Direction
+           } = State) ->
     try
-        State1 = State#{acc => Acc, point => util:def(Start, #{})},
+        {Point, Target} =
+            case Direction of
+                forward ->
+                    {util:def(Start, #{}), util:def(Stop, Front)};
+                reverse ->
+                    {util:def(Stop, #{}), util:def(Start, Front)}
+            end,
+        State1 = State#{acc => Acc, point => Point},
         State2 = replay(fun (Message, _Node, S = #{acc := A, locus := L}) ->
-                                S#{acc => Fun(Message, L, A)}
-                        end, [util:def(Stop, Front)], State1),
+                                case util:get(S, limit) of
+                                    undefined ->
+                                        S#{acc => Fun({L, Message}, A)};
+                                    0 ->
+                                        throw({stop, S});
+                                    N ->
+                                        S#{acc => Fun({L, Message}, A), limit => N - 1}
+                                end
+                        end, [Target], State1, Direction),
         util:get(State2, acc)
     catch
         %% fold only as far as we can go
-        throw:{unreachable, Target, S} ->
-            throw({unreachable, Target, util:get(S, acc)});
-        throw:{unsupported, Vsn, S} ->
-            throw({unsupported, Vsn, util:get(S, acc)})
+        throw:{unreachable, Tgt, #{acc := A}} ->
+            throw({unreachable, Tgt, A});
+        throw:{unsupported, Vsn, #{acc := A}} ->
+            throw({unsupported, Vsn, A});
+        throw:{stop, #{acc := A}} ->
+            A
     end;
-fold(Fun, Acc, Range, Home) ->
-    fold(Fun, Acc, Range, load_logs(#{home => Home})).
-
-%% dump logs to a list (e.g. for dev or debugging)
-
-range(StateOrHome) ->
-    range({undefined, undefined}, StateOrHome).
-
-range(Range, StateOrHome) ->
-    fold(fun (M, N, A) -> [{N, M}|A] end, [], Range, StateOrHome).
+fold(Fun, Acc, #{home := _, range := _, direction := Direction} = Opts) ->
+    fold(Fun, Acc, load_logs(Opts, Direction));
+fold(Fun, Acc, #{home := _, range := _} = Opts) ->
+    fold(Fun, Acc, Opts#{direction => forward});
+fold(Fun, Acc, #{home := _} = Opts) ->
+    fold(Fun, Acc, Opts#{range => {undefined, undefined}});
+fold(Fun, Acc, Home) ->
+    fold(Fun, Acc, #{home => Home}).
 
 %% replay all logs, ensuring each target one at a time or failing
 
-replay(Fun, [Target|Stack], State = #{point := Point, front := Front}) ->
+replay(Fun, Targets, State) ->
+    replay(Fun, Targets, State, forward).
+
+replay(Fun, [Target|Stack], State = #{point := Point, front := Front}, Direction) ->
     Replay =
         fun (Message, Node, S) ->
-                case loom:unmet_needs(Message, S) of
+                case loom:unmet_needs(Message, S, Direction) of
                     nil ->
                         Fun(Message, Node, S);
                     {vsn, Vsn} ->
                         throw({unsupported, Vsn, S});
-                    {deps, Deps} ->
-                        replay(Fun, [Deps, Target], S)
+                    {deps, Deps} when Direction =:= forward ->
+                        replay(Fun, [Deps, Target], S, Direction);
+                    {deps, Deps} when Direction =:= reverse ->
+                        replay(Fun, [Deps, Target], Fun(Message, Node, S), Direction)
                 end
         end,
-    case erloom:edge_delta(Target, Point) of
+    case erloom:edge_delta(Target, Point, Direction) of
         TP when map_size(TP) > 0 ->
             %% target is ahead of point: try to reach it
-            case erloom:edge_delta(Target, Front) of
+            case erloom:edge_delta(Target, Front, Direction) of
                 TF when map_size(TF) > 0 ->
                     %% target is unreachable: stop
                     throw({unreachable, Target, State});
@@ -176,41 +212,64 @@ replay(Fun, [Target|Stack], State = #{point := Point, front := Front}) ->
                     %% go after a node that's ahead, then try the whole thing again
                     %% since we may have covered more (or less) ground than we intended
                     [{Node, Range}|_] = maps:to_list(TP),
-                    State1 = replay(Replay, Range, Node, State),
-                    replay(Fun, [Target|Stack], State1)
+                    State1 = replay(Replay, Range, Node, State, Direction),
+                    replay(Fun, [Target|Stack], State1, Direction)
             end;
         _ ->
             %% target is reached
-            replay(Fun, Stack, State)
+            replay(Fun, Stack, State, Direction)
     end;
-replay(_, [], State) ->
+replay(_, [], State, _) ->
     State.
 
 %% replay a single node range, accumulating into state
 
-replay(Fun, {undefined, {BId, B}}, Node, State) ->
-    replay(Fun, {{first_id(Node, State), undefined}, {BId, B}}, Node, State);
-replay(Fun, {{AId, A}, {AId, B}}, Node, State) ->
+replay(Fun, {undefined, {BId, B}}, Node, State, Direction) ->
+    replay(Fun, {{first_id(Node, State, Direction), undefined}, {BId, B}}, Node, State, Direction);
+replay(Fun, {{AId, A}, undefined}, Node, State, Direction) ->
+    replay(Fun, {{AId, A}, {first_id(Node, State, Direction), undefined}}, Node, State, Direction);
+replay(Fun, {{AId, A}, {AId, B}}, Node, State, forward) ->
     {Log, State1} = obtain({Node, AId}, State),
     {{_, After}, State2 = #{point := Point}} =
         log:bendl(Log,
-                  fun ({{Before, _}, _}, S = #{point := #{Node := Mark}}) when {AId, Before} < Mark ->
+                  fun ({{At, _}, _}, S = #{point := #{Node := Mark}}) when {AId, At} < Mark ->
                           %% point already got ahead of us, just skip
+                          %% i.e. we already processed this data during another target
                           S;
-                      ({{Before, _} = Range, {ok, Data}}, S = #{point := P}) ->
-                          %% NB: we mark Before in case Fun decides to exit early
-                          P1 = P#{Node => {AId, Before}},
+                      ({{At, _} = Range, {ok, Data}}, S = #{point := P}) ->
+                          %% NB: we mark At in case Fun decides to exit early
+                          %% i.e. the state always reflects the point accurately
+                          P1 = P#{Node => {AId, At}},
                           S1 = S#{point => P1, locus => {{Node, AId}, Range}},
                           Fun(binary_to_term(Data), Node, S1);
                       ({_, {nil, _}}, S) ->
-                          %% skip nullified data
+                          %% skip nullified data (not safe, but can be done manually)
                           S
                   end, State1, {A, B}, #{rash => true}),
     State2#{point => Point#{Node => {AId, After}}};
-replay(Fun, {{AId, A}, {BId, B}}, Node, State) when AId < BId ->
-    IId = next_id({Node, AId}, State),
-    State1 = replay(Fun, {{AId, A}, {AId, undefined}}, Node, State),
-    replay(Fun, {{IId, undefined}, {BId, B}}, Node, State1).
+replay(Fun, {{AId, A}, {AId, B}}, Node, State, reverse) ->
+    {Log, State1} = obtain({Node, AId}, State),
+    {{After, _}, State2 = #{point := Point}} =
+        log:bendr(Log,
+                  fun ({{At, _}, _}, S = #{point := #{Node := Mark}}) when {AId, At} >= Mark ->
+                          %% point already got ahead of us, just skip
+                          %% i.e. we already processed this data during another target
+                          S;
+                      ({{At, _} = Range, {ok, Data}}, S = #{point := P}) ->
+                          %% NB: we mark At in case Fun decides to exit early
+                          %% i.e. the state always reflects the point accurately
+                          P1 = P#{Node => {AId, At}},
+                          S1 = S#{point => P1, locus => {{Node, AId}, Range}},
+                          Fun(binary_to_term(Data), Node, S1);
+                      ({_, {nil, _}}, S) ->
+                          %% skip nullified data (not safe, but can be done manually)
+                          S
+                  end, State1, {A, B}, #{rash => true}),
+    State2#{point => Point#{Node => {AId, After}}};
+replay(Fun, {{AId, A}, {BId, B}}, Node, State, Direction) when AId < BId ->
+    IId = next_id({Node, AId}, State, Direction),
+    State1 = replay(Fun, {{AId, A}, {AId, undefined}}, Node, State, Direction),
+    replay(Fun, {{IId, undefined}, {BId, B}}, Node, State1, Direction).
 
 %% grab the next batch of log entries in the range (i.e. for syncing)
 

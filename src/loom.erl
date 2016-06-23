@@ -196,6 +196,7 @@
          maybe_reply/3,
          wait/1,
          unmet_needs/2,
+         unmet_needs/3,
          verify_message/2,
          write_through/3,
          handle_idle/1,
@@ -725,15 +726,18 @@ meets_vsn(#{vsn := Vsn}, _) ->
 meets_vsn(_, _) ->
     {true, #{}}.
 
-unmet_needs(Message, State = #{point := Point}) ->
+unmet_needs(Message, State) ->
+    unmet_needs(Message, State, forward).
+
+unmet_needs(Message, State = #{point := Point}, Direction) ->
     case meets_vsn(Message, State) of
         {true, _} ->
             Deps = util:get(Message, deps, #{}),
             Refs = util:get(Message, refs, []),
-            All = erloom:edge_hull(Deps, erloom:loci_after(Refs)),
-            case erloom:edge_delta(All, Point) of
+            All = erloom:edge_hull(Deps, erloom:loci_after(Refs), Direction),
+            case erloom:edge_delta(All, Point, Direction) of
                 Delta when map_size(Delta) > 0 ->
-                    {deps, erloom:delta_upper(Delta)};
+                    {deps, erloom:delta_bound(Delta, Direction)};
                 _ ->
                     nil
             end;

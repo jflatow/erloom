@@ -18,12 +18,20 @@ add_paths() ->
 get_opts(Args) ->
     get_opts(Args, {[], []}).
 
-get_opts(["-d"|Rest], {Args, Opts}) ->
-    get_opts(Rest, {Args, [{deps, true}|Opts]});
+get_opts(["-n", Num|Rest], {Args, Opts}) ->
+    get_opts(Rest, {Args, [{limit, util:int(Num)}|Opts]});
 get_opts(["-r"|Rest], {Args, Opts}) ->
-    get_opts(Rest, {Args, [{refs, true}|Opts]});
+    get_opts(Rest, {Args, [{direction, reverse}|Opts]});
+
+get_opts(["-d"|Rest], {Args, Opts}) ->
+    get_opts(Rest, {Args, [{deps, true},
+                           {refs, true}|Opts]});
+get_opts(["-t"|Rest], {Args, Opts}) ->
+    get_opts(Rest, {Args, [{time, {unix, at}}|Opts]});
 get_opts(["-y"|Rest], {Args, Opts}) ->
     get_opts(Rest, {Args, [{yarn, true}|Opts]});
+get_opts(["-P"|Rest], {Args, Opts}) ->
+    get_opts(Rest, {Args, [{prior, true}|Opts]});
 get_opts([Arg|Rest], {Args, Opts}) ->
     get_opts(Rest, {[Arg|Args], Opts});
 get_opts([], {Args, Opts}) ->
@@ -37,9 +45,11 @@ main(Args) ->
     end.
 
 lcat(Home, Opts) ->
-    LocusFmt = erloom_bin:locus_formatter(Opts),
-    MessageFmt = erloom_bin:message_formatter(Opts),
+    {Dir, O1} = util:pop(Opts, direction, forward),
+    {Limit, O2} = util:pop(O1, limit),
+    LocusFmt = erloom_bin:locus_formatter(O2),
+    MessageFmt = erloom_bin:message_formatter(O2),
     erloom_logs:fold(
-      fun (Message, Locus,  _) ->
+      fun ({Locus, Message},  _) ->
               io:format("~s\t~s~n", [LocusFmt(Locus), MessageFmt(Message)])
-      end, nil, Home).
+      end, nil, #{home => Home, direction => Dir, limit => Limit}).

@@ -12,10 +12,11 @@ locus_formatter(_Opts) ->
 message_formatter(Opts) ->
     message_formatter(Opts, [{deps, skip},
                              {refs, skip},
-                             {time, {unix, at}},
+                             {time, skip},
                              {type, true},
                              {kind, true},
-                             {yarn, skip}]).
+                             {yarn, skip},
+                             {prior, skip}]).
 
 message_formatter(Opts, Defaults) ->
     {Desc, Transforms} =

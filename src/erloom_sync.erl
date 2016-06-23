@@ -114,7 +114,7 @@ handle_sync(Packet = #{requests := Requests}, State = #{opts := Opts}) ->
                           %% we include entries for every request, even if its empty
                           %% this ensures we are sent a reply under normal circumstances
                           {Which, EntryList, S1} = erloom_logs:slice(LogLimit, Range, Node, S),
-                          R1 = util:modify(R, [entries, Which], lists:reverse(EntryList)),
+                          R1 = util:modify(R, [entries, Which], EntryList),
                           {R1, S1}
                   end, {#{}, State}, Requests),
     reply_sync(Packet, Reply, State1);
