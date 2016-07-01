@@ -27,7 +27,7 @@ opts({?MODULE, _}) ->
     #{
       idle_timeout => time:timeout({1, minutes}),
       wipe_timeout => time:timeout({5, seconds}),
-      sync_interval => 3000 + random:uniform(3000),
+      sync_interval => 3000 + rand:uniform(3000),
       sync_push_prob => 0.5,
       unanswered_max => 1
      }.
@@ -75,10 +75,17 @@ handle_message(#{write := _}, _, true, State = #{wrote := Wrote}) ->
     State#{response => Wrote};
 handle_message(#{make := continue}, _, true, State) ->
     State1 = loom:obtain_continuation(the_frame, State),
-    State1#{response => util:get(State1, continuation)};
+    State1#{response => #{
+              type => continue,
+              token => util:get(State1, continuation)
+             }};
 handle_message({Param, the_frame}, Node, _, State) ->
     io:format("~p continued with ~p~n", [Node, Param]),
-    State;
+    loom:switch_message(#{switch => 1}, State);
+handle_message(#{switch := 1}, _Node, _, State) ->
+    loom:switch_message(#{switch => 2}, State);
+handle_message(#{switch := 2}, _Node, _, State) ->
+    State#{response => 2};
 handle_message(Message, Node, true, State) ->
     io:format("~p new message: ~256p~n", [Node, Message]),
     State;
@@ -94,7 +101,7 @@ vote_on_motion(Motion, Mover, State) ->
     {{yea, ok}, State}.
 
 motion_decided(#{kind := chain, path := xyz}, Mover, {true, _}, State) when Mover =:= node() ->
-    GenVal = base64url:encode(crypto:rand_bytes(8)),
+    GenVal = base64url:encode(crypto:strong_rand_bytes(8)),
     Modify = #{type => command, verb => modify, kind => chain, path => xyz, value => GenVal},
     State1 = loom:suture_yarn(Modify, State),
     State1#{response => [Mover, 'did pass chain']};

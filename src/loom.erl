@@ -499,7 +499,7 @@ opts(Spec) ->
       idle_timeout => infinity,
       wipe_timeout => time:timeout({30, minutes}),
       sync_initial => time:timer(),
-      sync_interval => 60000 + random:uniform(10000), %% stagger for efficiency
+      sync_interval => 60000 + rand:uniform(10000), %% stagger for efficiency
       sync_log_limit => 1000,
       sync_push_prob => 0.10,
       task_limit => 100,
@@ -850,6 +850,8 @@ handle_builtin(Message = #{type := continue, token := Token}, Node, IsNew, State
     handle_message({util:get(Message, param), Frame}, Node, IsNew, State);
 
 handle_builtin(_Message, _Node, _IsNew, State) ->
+    %% the default builtin behavior is to respond ok
+    %% therefore, custom message handlers must call wait to disable reply
     State#{response => ok}.
 
 handle_message(Message, Node, IsNew, State) ->
@@ -928,6 +930,7 @@ change_peers({'=', Nodes}, State) ->
 %% Emit a message to be handled next, before any other messages are received
 %% Typically only do this with muted or new messages, otherwise happens every replay
 %% Same goes below for switching the message (which also transfers the reply)
+%% Since this doesn't transfer the reply, its generally not what you want
 
 emit(Message, State) ->
     util:modify(State, [emits], fun (E) -> [{undefined, Message, undefined}|E] end).
@@ -1015,7 +1018,7 @@ create_continuation(Frame, State) ->
 create_continuation(Frame, LifeTime, State) ->
     %% the frame gives the context for the continuation
     %% the continuation token can be retrieved from the state
-    Token = base64url:encode(crypto:rand_bytes(48)),
+    Token = base64url:encode(crypto:strong_rand_bytes(48)),
     Create = #{
       type => command,
       verb => create,

@@ -29,7 +29,7 @@ maybe_push(State = #{edges := Edges, front := Front, peers := Peers, opts := Opt
     %% we also randomly sync regardless, in case the node got replaced
     %% just include our front, no requests, no entries
     SyncPushProb = util:get(Opts, sync_push_prob),
-    PushAnyway = random:uniform() < SyncPushProb,
+    PushAnyway = rand:uniform() < SyncPushProb,
     maps:fold(fun (Node, _, S) ->
                       Edge = util:get(Edges, Node, #{}),
                       case erloom:edge_delta(Front, Edge) of
