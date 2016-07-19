@@ -26,7 +26,7 @@ home({?MODULE, Name}) ->
 opts({?MODULE, _}) ->
     #{
       idle_timeout => time:timeout({1, minutes}),
-      wipe_timeout => time:timeout({5, seconds}),
+      wipe_timeout => time:timeout({30, seconds}),
       sync_interval => 3000 + rand:uniform(3000),
       sync_push_prob => 0.5,
       unanswered_max => 1

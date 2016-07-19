@@ -106,6 +106,7 @@
 -callback keep(state()) -> state().
 -callback init(state()) -> state().
 -callback waken(state()) -> state().
+-callback sleep(state()) -> state().
 -callback verify_message(message(), state()) ->
     {ok, message(), state()} |
     {missing, erloom:edge(), state()} |
@@ -130,6 +131,7 @@
                      keep/1,
                      init/1,
                      waken/1,
+                     sleep/1,
                      verify_message/2,
                      write_through/3,
                      handle_idle/1,
@@ -444,14 +446,12 @@ deliver(Nodes, Spec, Message, Ctx, Tried, Remaining) ->
                 {badrpc, _} ->
                     %% the message never even got to the loom
                     deliver(Nodes, Spec, Message, Ctx, T1, R1);
-                {retry, _} ->
-                    %% the loom didn't accept the message
-                    deliver(Nodes, Spec, Message, Ctx, T1, R1);
                 {wait, timeout} ->
-                    %% timeout is considered a failure during delivery
+                    %% timeout is considered a delivery failure
                     deliver(Nodes, Spec, Message, Ctx, T1, R1);
                 _ ->
                     %% any other response from the loom is considered received
+                    %% NB: including an explicit retry message from the loom
                     {ok, Response,
                      util:set(Ctx, dstat,
                               #{
@@ -585,7 +585,7 @@ waken(State) ->
 sleep(State) ->
     State1 = save(State),
     erloom_logs:close(State1),
-    exit(sleep).
+    callback(State1, {sleep, 1}, [State1], fun () -> exit(sleep) end).
 
 start(_, State = #{active := true}) ->
     State;
@@ -786,6 +786,10 @@ verify_message(Message, State) ->
 
 write_through(#{type := move}, _, _) ->
     {0, infinity};
+write_through(#{type := save}, _, _) ->
+    {0, infinity};
+write_through(#{type := sleep}, _, _) ->
+    {0, infinity};
 write_through(#{type := tether}, _, _) ->
     {0, infinity};
 write_through(#{mute := true}, _, _) ->
@@ -882,7 +886,9 @@ task_completed(Message = #{yarn := Yarn}, Node, Result, State) ->
     %% NB: there is no way to override this from the task_completed handler
     %%     the response in the handler is for the task process itself
     State1 = maybe_reply(Yarn, util:get(Message, value), State),
-    callback(State1, {task_completed, 4}, [Message, Node, Result, State1], State1).
+    callback(State1, {task_completed, 4}, [Message, Node, Result, State1], State1);
+task_completed(Message, Node, Result, State) ->
+    callback(State, {task_completed, 4}, [Message, Node, Result, State], State).
 
 task_continued(Name, Reason, Clock, Arg, State) ->
     callback(State, {task_continued, 5}, [Name, Reason, Clock, Arg, State], ok).

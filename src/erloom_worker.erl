@@ -90,7 +90,7 @@ write_through({W, T}, Message, State = #{peers := Peers, ours := Ours}) when W >
     Tip = util:lookup(State2, [front, node()]),
     wait_for({W, T}, 1, Tip, time:timer(), State2#{peers => Peers1});
 write_through({0, _}, _, State) ->
-    State.
+    State#{wrote => {0, 0}}.
 
 wait_for({W, T}, N, Tip, Start, State = #{peers := Peers}) when N < W ->
     %% give the nodes a chance to reply that they've synced up to our tip

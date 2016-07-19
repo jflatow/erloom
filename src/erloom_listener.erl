@@ -80,6 +80,8 @@ listen(ready, State = #{opts := Opts, active := Active}) ->
                         loom:handle_idle(util:modify(State1, [opts, idle_elapsed], 0));
                     E2 when E2 >= WipeTimeout, NTasks =:= 0, not Active ->
                         loom:wipe(State1);
+                    E2 when E2 >= IdleTimeout ->
+                        util:modify(State1, [opts, idle_elapsed], 0);
                     E2 ->
                         util:modify(State1, [opts, idle_elapsed], E2)
                 end,

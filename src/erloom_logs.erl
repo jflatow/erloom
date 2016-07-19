@@ -43,7 +43,7 @@ load_node(Node, [IId|Rest], State = #{front := Front}, Direction) ->
             %%  in that case we must ignore the new log front until we write to it
             %% it *can* also happen if we die in the middle of a sync:
             %%  in that case we will open the new log later
-            load_node(Node, Rest, State1);
+            load_node(Node, Rest, State1, Direction);
         {false, Log, State1} when Direction =:= forward ->
             %% if the log has entries we're good, update the front accordingly
             State1#{front => Front#{Node => {IId, log:locus(Log)}}};
