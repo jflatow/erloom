@@ -12,8 +12,9 @@ follow(Path) ->
 add_paths() ->
     Script = follow(escript:script_name()),
     RelPath = filename:dirname(filename:dirname(Script)),
-    code:add_paths([RelPath ++ "/ebin",
-                    RelPath ++ "/deps/erlkit/ebin"]).
+    code:add_pathsa([RelPath ++ "/ebin",
+                     RelPath ++ "/deps/erlkit/ebin",
+                     RelPath ++ "/../erlkit/ebin"]).
 
 main([Rel, Offs|Roots]) ->
     add_paths(),
